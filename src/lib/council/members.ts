@@ -35,7 +35,7 @@ export const COUNCIL_MEMBERS: Record<OrishaName, CouncilMember> = {
     strengths: ["Pattern detection", "Targeted research", "Filtering noise"],
     blindSpots: ["Broad synthesis", "Social cohesion", "Long-term strategy"],
     accentColor: "#059669", // Emerald
-    isActive: false,
+    isActive: true,
   },
   Oshun: {
     id: "Oshun",
@@ -47,7 +47,7 @@ export const COUNCIL_MEMBERS: Record<OrishaName, CouncilMember> = {
     strengths: ["Emotional intelligence", "Persuasion", "Harmony"],
     blindSpots: ["Hard constraints", "Blunt truths", "Technical minutiae"],
     accentColor: "#EAB308", // Yellow
-    isActive: false,
+    isActive: true,
   },
   Yemoja: {
     id: "Yemoja",
@@ -59,7 +59,7 @@ export const COUNCIL_MEMBERS: Record<OrishaName, CouncilMember> = {
     strengths: ["Long-term continuity", "Emotional depth", "Stability"],
     blindSpots: ["Rapid disruption", "Cold logic", "Aggressive growth"],
     accentColor: "#2563EB", // Blue
-    isActive: false,
+    isActive: true,
   },
   Orunmila: {
     id: "Orunmila",
@@ -83,6 +83,6 @@ export const COUNCIL_MEMBERS: Record<OrishaName, CouncilMember> = {
     strengths: ["Priority setting", "Decisive action", "Energy mobilization"],
     blindSpots: ["Subtlety", "Patience", "Minority views"],
     accentColor: "#B91C1C", // Dark Red
-    isActive: false,
+    isActive: true,
   },
 };

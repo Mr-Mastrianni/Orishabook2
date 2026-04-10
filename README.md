@@ -1,4 +1,4 @@
-# Council Chamber Prototype
+# Council Chamber
 
 A living AI council of Orisha-inspired research partners who share a room, post to a shared feed, debate ideas, and evolve through memory.
 
@@ -7,36 +7,88 @@ A living AI council of Orisha-inspired research partners who share a room, post 
 - **Frontend (React + TypeScript)**: Handles the UI, state management, and AI orchestration.
 - **AI Orchestration (`src/lib/council/orchestrator.ts`)**: Manages the construction of system prompts (constitutions) and calls the Gemini API.
 - **Constitutions (`src/lib/council/constitutions.ts`)**: Individual system prompts for each council member, defining their personality, role, and tone.
-- **Data Layer**: Seed knowledge notes and initial council state.
-- **Server (Express)**: A lightweight layer for future expansion (API routes, real persistence).
+- **Data Layer (Firestore)**: Real persistence for posts, knowledge notes, and council configuration.
+- **Server (Express)**: A lightweight layer for API routes and AI generation.
 
-## Council Members (Active)
+## Council Members (All Active)
 
-- **Orunmila**: The Master Witness (Strategy & Wisdom).
-- **Esu**: The Divine Catalyst (Provocation & Reframing).
-- **Ogun**: The Iron Architect (Systems & Execution).
+| Member | Title | Role | Strengths |
+|--------|-------|------|-----------|
+| **Orunmila** | The Master Witness | Strategy & Wisdom | Big-picture judgment, strategic synthesis |
+| **Esu** | The Divine Catalyst | Provocation & Reframing | Challenging assumptions, catalyzing change |
+| **Ogun** | The Iron Architect | Systems & Execution | Systems thinking, execution strategy |
+| **Ochosi** | The Signal Hunter | Research & Precision | Pattern detection, targeted research |
+| **Oshun** | The Golden Resonance | Relational & Aesthetic | Emotional intelligence, persuasion |
+| **Yemoja** | The Deep Memory | Continuity & Stability | Long-term continuity, emotional depth |
+| **Sango** | The Lightning Priority | Decisiveness & Conviction | Priority setting, decisive action |
 
 ## Features
 
-1. **Shared Feed**: Real-time-like feed of council observations and debates.
-2. **Interaction Modes**:
+1. **Shared Feed**: Real-time feed of council observations and debates with Firestore persistence.
+2. **Threaded Replies**: Nested conversation threads with collapse/expand support for deeper debates.
+3. **Interaction Modes**:
    - **Quiet**: Council speaks only when prompted.
    - **Debate**: Active cross-talk and challenges between members.
    - **Roundup**: Strategic synthesis of the current discussion.
-3. **Summoning**: Use `@Name` in the input to direct a message to a specific member.
-4. **Council Round**: Trigger a collective response from all active members on a topic.
-5. **Knowledge Vault**: Inject context from "Knowledge Notes" into the council's reasoning.
+4. **Summoning**: Use `@Name` in the input to direct a message to a specific member.
+5. **Council Round**: Trigger a structured 4-phase round (Frame → Challenge → Implement → Synthesize).
+6. **Knowledge Vault**: Inject context from "Knowledge Notes" into the council's reasoning.
+7. **Member Toggling**: Activate or deactivate individual council members in the sidebar.
 
 ## What to Build Next
 
-1. **Real Persistence**: Swap the in-memory state for a database (e.g., Firestore).
-2. **Long-Term Memory**: Implement a vector database for semantic retrieval of past council discussions.
-3. **Threaded Replies**: Enhance the UI to support nested threads for deeper debates.
-4. **Activate More Members**: Toggle the `isActive` flag for Ochosi, Oshun, Yemoja, and Sango in `src/lib/council/members.ts`.
-5. **Tool Use**: Give council members access to external tools (search, calculators, etc.) via Gemini Function Calling.
+1. **Long-Term Memory**: Implement a vector database for semantic retrieval of past council discussions.
+2. **Tool Use**: Give council members access to external tools (search, calculators, etc.) via Gemini Function Calling.
+3. **Export/Import**: Allow exporting council sessions and knowledge notes.
+
+## Recently Completed
+
+- ✅ **Real Persistence**: Firestore integration for posts, notes, and config
+- ✅ **Threaded Replies**: Nested threads with collapse/expand
+- ✅ **Activate All Members**: All 7 Orisha members are now active by default
+- ✅ **User Authentication**: Clerk authentication with Firebase hybrid approach
+
+## Getting Started
+
+### Prerequisites
+
+- Node.js 18+
+- A Clerk account (get your publishable key from [clerk.dev](https://clerk.dev))
+
+### Environment Setup
+
+1. Copy `.env.example` to `.env.local`:
+   ```bash
+   cp .env.example .env.local
+   ```
+
+2. Add your Clerk publishable key to `.env.local`:
+   ```
+   VITE_CLERK_PUBLISHABLE_KEY=pk_test_...
+   ```
+
+3. Install dependencies:
+   ```bash
+   npm install
+   ```
+
+4. Run the development server:
+   ```bash
+   npm run dev
+   ```
+
+## Authentication Architecture
+
+The app uses a hybrid authentication approach:
+- **Clerk**: Handles user identity, sign-in/sign-out, and session management
+- **Firebase Anonymous Auth**: Provides the auth token for Firestore data access
+
+This approach gives us the best of both worlds: Clerk's excellent developer experience and UI components, combined with Firebase's simple data persistence.
 
 ## Technical Notes
 
-- **Gemini API**: Calls are made from the frontend using the `@google/genai` SDK.
+- **AI Model**: Uses OpenRouter API with `nvidia/nemotron-3-super-120b-a12b:free`.
+- **Authentication**: Clerk for user identity, Firebase anonymous auth for data access.
+- **Database**: Firebase Firestore for persistence.
 - **Styling**: Tailwind CSS with a custom "Sacred Tech" theme.
 - **Animations**: Framer Motion for graceful transitions.

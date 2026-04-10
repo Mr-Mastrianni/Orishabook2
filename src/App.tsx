@@ -17,6 +17,8 @@ import {
   Compass,
   Flame,
   Menu,
+  MessageCircle,
+  CornerDownLeft,
   X,
   Plus,
   Minus,
@@ -26,7 +28,12 @@ import {
   CornerDownRight,
   Save,
   HelpCircle,
-  Trash
+  Trash,
+  MoreVertical,
+  ChevronUp,
+  Loader2,
+  LogOut,
+  User as UserIcon
 } from "lucide-react";
 import { cn } from "./lib/utils";
 import {
@@ -39,39 +46,33 @@ import {
   RoundPhase
 } from "./lib/council/types";
 import { COUNCIL_MEMBERS } from "./lib/council/members";
-import { SEED_NOTES } from "./data/notes";
 import { generateCouncilResponse } from "./lib/council/orchestrator";
+import {
+  getPosts,
+  addPost as addPostToFirestore,
+  clearAllPosts,
+  getNotes,
+  addNote as addNoteToFirestore,
+  updateNote as updateNoteInFirestore,
+  deleteNote as deleteNoteFromFirestore,
+  getConfig,
+  updateConfig,
+  initializeData,
+} from "./lib/persistence";
+import { 
+  useUser, 
+  useClerk, 
+  SignedIn, 
+  SignedOut,
+  SignInButton,
+  UserButton
+} from "@clerk/clerk-react";
 import UserManual from "./UserManual";
-
-// Local storage (in-memory)
-const LOCAL_STORAGE_KEY = "council_data";
-
-const getLocalData = () => {
-  const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
-  if (saved) {
-    return JSON.parse(saved);
-  }
-  return {
-    posts: [],
-    notes: SEED_NOTES.map((n, i) => ({ ...n, id: `note-${i}` })),
-    config: { mode: "quiet", activeMembers: ["Orunmila", "Esu", "Ogun"] as OrishaName[] }
-  };
-};
-
-const saveLocalData = (data: { posts: Post[], notes: KnowledgeNote[], config: { mode: InteractionMode, activeMembers: OrishaName[] } }) => {
-  localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(data));
-};
-
-// Mock user for display purposes only (no auth required)
-const MOCK_USER = {
-  displayName: "Seeker",
-  uid: "anonymous"
-};
 
 export default function App() {
   const [state, setState] = useState<CouncilState>({
     mode: "quiet",
-    activeMembers: ["Orunmila", "Esu", "Ogun"],
+    activeMembers: ["Orunmila", "Esu", "Ogun", "Ochosi", "Oshun", "Yemoja", "Sango"],
     posts: [],
     notes: [],
   });
@@ -89,59 +90,143 @@ export default function App() {
   const [replyTarget, setReplyTarget] = useState<Post | null>(null);
   const [currentRoundPhase, setCurrentRoundPhase] = useState<string | null>(null);
   const [isManualOpen, setIsManualOpen] = useState(false);
+  const [showScrollToTop, setShowScrollToTop] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [firebaseReady, setFirebaseReady] = useState(false);
   const feedEndRef = useRef<HTMLDivElement>(null);
+  const feedContainerRef = useRef<HTMLDivElement>(null);
+  
+  // Clerk auth
+  const { user, isSignedIn } = useUser();
+  const clerk = useClerk();
 
-  // Load data from localStorage on mount
+  // Initialize Firebase anonymous auth when Clerk user is signed in
   useEffect(() => {
-    const localData = getLocalData();
-    setState({
-      mode: localData.config.mode,
-      activeMembers: localData.config.activeMembers,
-      posts: localData.posts,
-      notes: localData.notes,
-    });
-  }, []);
+    const initAuth = async () => {
+      if (!isSignedIn) {
+        setIsLoading(false);
+        setFirebaseReady(false);
+        return;
+      }
+      
+      // Sign in anonymously to Firebase for Firestore access
+      // This is a hybrid approach: Clerk for user identity, Firebase for data persistence
+      try {
+        const { signInAnonymously } = await import('firebase/auth');
+        const { auth } = await import('./firebase');
+        await signInAnonymously(auth);
+        setFirebaseReady(true);
+      } catch (error) {
+        console.error("Firebase auth failed:", error);
+        setIsLoading(false);
+      }
+    };
+
+    initAuth();
+  }, [isSignedIn]);
+
+  // Load data from Firestore when Firebase auth is ready
+  useEffect(() => {
+    const loadData = async () => {
+      if (!firebaseReady) return;
+      
+      try {
+        const data = await initializeData();
+        setState({
+          mode: data.config.mode,
+          activeMembers: data.config.activeMembers as OrishaName[],
+          posts: data.posts,
+          notes: data.notes,
+        });
+      } catch (error) {
+        console.error("Failed to load data:", error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    loadData();
+  }, [firebaseReady]);
 
   useEffect(() => {
     feedEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [state.posts]);
 
-  const addPost = (post: Partial<Post>) => {
-    const newPost: Post = {
-      id: `post-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      authorId: post.authorId || "user",
-      authorName: post.authorName || "Seeker",
-      content: post.content || "",
-      timestamp: Date.now(),
-      ...post,
-    } as Post;
+  // Track scroll position for floating buttons
+  useEffect(() => {
+    const container = feedContainerRef.current;
+    if (!container) return;
+    
+    const handleScroll = () => {
+      setShowScrollToTop(container.scrollTop > 300);
+    };
+    
+    container.addEventListener("scroll", handleScroll);
+    return () => container.removeEventListener("scroll", handleScroll);
+  }, []);
 
-    const localData = getLocalData();
-    localData.posts.push(newPost);
-    // Keep only last 100 posts
-    if (localData.posts.length > 100) {
-      localData.posts = localData.posts.slice(-100);
-    }
-    saveLocalData(localData);
-    setState(prev => ({ ...prev, posts: localData.posts }));
+  const scrollToTop = () => {
+    feedContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  const toggleMember = (memberId: OrishaName) => {
+  const getUserDisplayName = () => {
+    if (user) {
+      return user.firstName || user.username || user.primaryEmailAddress?.emailAddress?.split('@')[0] || "Seeker";
+    }
+    return "Seeker";
+  };
+
+  const addPost = async (post: Partial<Post>) => {
+    const newPostData: Omit<Post, "id"> = {
+      authorId: post.authorId || "user",
+      authorName: post.authorName || getUserDisplayName(),
+      content: post.content || "",
+      timestamp: Date.now(),
+      tags: post.tags || [],
+      threadId: post.threadId,
+      parentId: post.parentId,
+      referencedNoteId: post.referencedNoteId,
+    };
+
+    try {
+      const newPost = await addPostToFirestore(newPostData);
+      setState(prev => {
+        const newPosts = [...prev.posts, newPost];
+        // Keep only last 100 posts
+        if (newPosts.length > 100) {
+          return { ...prev, posts: newPosts.slice(-100) };
+        }
+        return { ...prev, posts: newPosts };
+      });
+    } catch (error) {
+      console.error("Failed to add post:", error);
+      // Fallback: add to local state only
+      const fallbackPost: Post = { ...newPostData, id: `temp-${Date.now()}` };
+      setState(prev => ({ ...prev, posts: [...prev.posts, fallbackPost] }));
+    }
+  };
+
+  const toggleMember = async (memberId: OrishaName) => {
     const newActiveMembers = state.activeMembers.includes(memberId)
       ? state.activeMembers.filter(id => id !== memberId)
       : [...state.activeMembers, memberId];
     
-    const localData = getLocalData();
-    localData.config.activeMembers = newActiveMembers;
-    saveLocalData(localData);
     setState(prev => ({ ...prev, activeMembers: newActiveMembers }));
+    
+    try {
+      await updateConfig({ activeMembers: newActiveMembers });
+    } catch (error) {
+      console.error("Failed to update config:", error);
+    }
   };
 
-  const setMode = (mode: InteractionMode) => {
-    const localData = getLocalData();
-    localData.config.mode = mode;
-    saveLocalData(localData);
+  const setMode = async (mode: InteractionMode) => {
     setState(prev => ({ ...prev, mode }));
+    try {
+      await updateConfig({ mode });
+    } catch (error) {
+      console.error("Failed to update config:", error);
+    }
   };
 
   const handleSend = async () => {
@@ -149,7 +234,7 @@ export default function App() {
     
     const userPost: Partial<Post> = {
       authorId: "user",
-      authorName: MOCK_USER.displayName,
+      authorName: getUserDisplayName(),
       content: inputValue,
       ...(replyTarget ? { parentId: replyTarget.id, threadId: replyTarget.threadId || replyTarget.id } : {}),
     };
@@ -356,13 +441,17 @@ export default function App() {
     setCurrentRoundPhase(null);
   };
 
-  const clearHistory = () => {
+  const clearHistory = async () => {
     if (!window.confirm("Are you sure you want to clear the chamber history? This cannot be undone.")) return;
     
-    const localData = getLocalData();
-    localData.posts = [];
-    saveLocalData(localData);
-    setState(prev => ({ ...prev, posts: [] }));
+    try {
+      await clearAllPosts();
+      setState(prev => ({ ...prev, posts: [] }));
+    } catch (error) {
+      console.error("Failed to clear history:", error);
+      // Fallback: clear local state only
+      setState(prev => ({ ...prev, posts: [] }));
+    }
     setIsSettingsOpen(false);
   };
 
@@ -385,7 +474,7 @@ export default function App() {
     setIsNoteEditorOpen(true);
   };
 
-  const saveNote = () => {
+  const saveNote = async () => {
     if (!noteForm.title.trim() || !noteForm.content.trim()) return;
 
     const noteData: Omit<KnowledgeNote, "id"> = {
@@ -397,34 +486,60 @@ export default function App() {
       ...(noteForm.citation.trim() ? { citation: noteForm.citation.trim() } : {}),
     };
 
-    const localData = getLocalData();
-    if (editingNote) {
-      const idx = localData.notes.findIndex((n: KnowledgeNote) => n.id === editingNote.id);
-      if (idx >= 0) localData.notes[idx] = { ...noteData, id: editingNote.id };
-    } else {
-      localData.notes.push({ ...noteData, id: `note-${Date.now()}` });
+    try {
+      if (editingNote) {
+        await updateNoteInFirestore(editingNote.id, noteData);
+        setState(prev => ({
+          ...prev,
+          notes: prev.notes.map(n => 
+            n.id === editingNote.id ? { ...noteData, id: editingNote.id } : n
+          ),
+        }));
+      } else {
+        const newNote = await addNoteToFirestore(noteData);
+        setState(prev => ({ ...prev, notes: [...prev.notes, newNote] }));
+      }
+      setIsNoteEditorOpen(false);
+      setEditingNote(null);
+    } catch (error) {
+      console.error("Failed to save note:", error);
     }
-    saveLocalData(localData);
-    setState(prev => ({ ...prev, notes: localData.notes }));
-
-    setIsNoteEditorOpen(false);
-    setEditingNote(null);
   };
 
-  const deleteNote = (noteId: string) => {
+  const deleteNote = async (noteId: string) => {
     if (!window.confirm("Delete this knowledge note?")) return;
 
-    const localData = getLocalData();
-    localData.notes = localData.notes.filter((n: KnowledgeNote) => n.id !== noteId);
-    saveLocalData(localData);
-    setState(prev => ({ ...prev, notes: localData.notes }));
-
-    if (selectedNoteId === noteId) setSelectedNoteId(null);
+    try {
+      await deleteNoteFromFirestore(noteId);
+      setState(prev => ({ 
+        ...prev, 
+        notes: prev.notes.filter(n => n.id !== noteId) 
+      }));
+      if (selectedNoteId === noteId) setSelectedNoteId(null);
+    } catch (error) {
+      console.error("Failed to delete note:", error);
+    }
   };
 
   // --- Threaded helpers ---
   const rootPosts = state.posts.filter(p => !p.parentId);
   const getReplies = (postId: string) => state.posts.filter(p => p.parentId === postId);
+  const getAllThreadPosts = (threadId: string) => state.posts.filter(p => p.threadId === threadId || p.id === threadId);
+  const getReplyCount = (postId: string) => state.posts.filter(p => p.threadId === postId || p.parentId === postId).length;
+  
+  // Track collapsed threads
+  const [collapsedThreads, setCollapsedThreads] = useState<Set<string>>(new Set());
+  const toggleThreadCollapse = (postId: string) => {
+    setCollapsedThreads(prev => {
+      const next = new Set(prev);
+      if (next.has(postId)) {
+        next.delete(postId);
+      } else {
+        next.add(postId);
+      }
+      return next;
+    });
+  };
 
   const getMemberPattern = (id: OrishaName) => {
     switch (id) {
@@ -439,10 +554,15 @@ export default function App() {
     }
   };
 
-  const renderPostBubble = (post: Post, isReply: boolean) => {
+  const renderPostBubble = (post: Post, isReply: boolean, depth: number = 0) => {
     const member = COUNCIL_MEMBERS[post.authorId as OrishaName];
     const isUser = post.authorId === "user";
     const isSystem = post.authorName === "System";
+    const replies = getReplies(post.id);
+    const replyCount = getReplyCount(post.id);
+    const hasReplies = replies.length > 0;
+    const isCollapsed = collapsedThreads.has(post.id);
+    const isMaxDepth = depth >= 3; // Limit nesting depth for UI
 
     return (
       <motion.div
@@ -536,19 +656,149 @@ export default function App() {
             )}
           </div>
 
-          {!isSystem && !isReply && (
+          <div className={cn("flex items-center gap-3", isUser ? "justify-end" : "justify-start")}>
+            {!isSystem && (
+              <button
+                onClick={() => setReplyTarget(post)}
+                className="flex items-center gap-1.5 text-[9px] text-chamber-muted hover:text-white opacity-0 group-hover/post:opacity-100 transition-all uppercase tracking-widest"
+              >
+                <Reply className="w-3 h-3" />
+                Reply
+              </button>
+            )}
+            {hasReplies && (
+              <button
+                onClick={() => toggleThreadCollapse(post.id)}
+                className="flex items-center gap-1.5 text-[9px] text-chamber-muted hover:text-white transition-all uppercase tracking-widest"
+              >
+                <MessageCircle className="w-3 h-3" />
+                {isCollapsed ? `Show ${replyCount} replies` : `Hide ${replyCount} replies`}
+              </button>
+            )}
+          </div>
+          
+          {/* Render nested replies */}
+          {hasReplies && !isCollapsed && !isMaxDepth && (
+            <div className={cn(
+              "mt-4 space-y-4",
+              isUser ? "mr-4 lg:mr-6" : "ml-4 lg:ml-6"
+            )}>
+              {replies.map(reply => (
+                <div key={reply.id} className="border-l-2 border-chamber-border/40 pl-4">
+                  {renderPostBubble(reply, true, depth + 1)}
+                </div>
+              ))}
+            </div>
+          )}
+          
+          {/* Show indicator if replies are collapsed */}
+          {hasReplies && isCollapsed && (
             <button
-              onClick={() => setReplyTarget(post)}
-              className="flex items-center gap-1.5 text-[9px] text-chamber-muted hover:text-white opacity-0 group-hover/post:opacity-100 transition-all uppercase tracking-widest"
+              onClick={() => toggleThreadCollapse(post.id)}
+              className={cn(
+                "mt-2 text-[9px] text-chamber-muted hover:text-white flex items-center gap-1.5",
+                isUser ? "justify-end" : "justify-start"
+              )}
             >
-              <Reply className="w-3 h-3" />
-              Reply
+              <CornerDownLeft className="w-3 h-3" />
+              {replyCount} hidden {replyCount === 1 ? 'reply' : 'replies'}
             </button>
           )}
         </div>
       </motion.div>
     );
   };
+
+  // Loading state
+  if (isLoading) {
+    return (
+      <div className="flex h-screen w-full bg-chamber-bg text-chamber-ink items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <Loader2 className="w-10 h-10 text-chamber-muted animate-spin" />
+          <p className="text-sm text-chamber-muted">Connecting to the Council Chamber...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Auth wall - show sign in prompt if not authenticated
+  if (!isSignedIn) {
+    return (
+      <div className="flex h-screen w-full bg-chamber-bg text-chamber-ink overflow-hidden font-sans relative">
+        {/* Background pattern */}
+        <div className="absolute inset-0 opacity-5">
+          <div className="absolute inset-0" style={{
+            backgroundImage: `radial-gradient(circle at 25% 25%, #7C3AED 0%, transparent 50%),
+                              radial-gradient(circle at 75% 75%, #2563EB 0%, transparent 50%)`,
+          }} />
+        </div>
+        
+        <div className="flex-1 flex flex-col items-center justify-center p-8 relative z-10">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6 }}
+            className="text-center max-w-md"
+          >
+            <div className="w-20 h-20 mx-auto mb-8 rounded-2xl bg-gradient-to-br from-violet-500/20 to-blue-500/20 border border-white/10 flex items-center justify-center">
+              <Shield className="w-10 h-10 text-white/70" />
+            </div>
+            
+            <h1 className="font-display text-3xl font-bold mb-4 tracking-tight">
+              Council Chamber
+            </h1>
+            <p className="text-chamber-muted mb-8 leading-relaxed">
+              A living AI council of Orisha-inspired research partners who share a room, 
+              post to a shared feed, debate ideas, and evolve through memory.
+            </p>
+            
+            <div className="flex flex-col sm:flex-row gap-4 justify-center">
+              <SignInButton mode="modal">
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  className="px-8 py-3 bg-white text-black rounded-xl font-bold hover:bg-white/90 transition-all flex items-center justify-center gap-2"
+                >
+                  <UserIcon className="w-5 h-5" />
+                  Enter the Chamber
+                </motion.button>
+              </SignInButton>
+            </div>
+            
+            <p className="mt-6 text-xs text-chamber-muted/60">
+              Secure authentication powered by Clerk
+            </p>
+          </motion.div>
+          
+          {/* Council members preview */}
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: 0.3, duration: 0.6 }}
+            className="mt-16 flex flex-wrap justify-center gap-3"
+          >
+            {Object.values(COUNCIL_MEMBERS).slice(0, 7).map((member, i) => (
+              <motion.div
+                key={member.id}
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ delay: 0.4 + i * 0.1 }}
+                className="w-10 h-10 rounded-lg flex items-center justify-center font-display font-bold text-sm"
+                style={{ 
+                  backgroundColor: member.accentColor + "20",
+                  color: member.accentColor,
+                  border: `1px solid ${member.accentColor}40`
+                }}
+                title={member.name}
+              >
+                {member.name[0]}
+              </motion.div>
+            ))}
+          </motion.div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen w-full bg-chamber-bg text-chamber-ink overflow-hidden font-sans relative">
@@ -654,7 +904,7 @@ export default function App() {
 
       {/* Main Content: Chamber Feed */}
       <main className="flex-1 flex flex-col relative min-w-0">
-        <header className="h-20 border-b border-chamber-border flex items-center justify-between px-4 lg:px-8 bg-chamber-bg/80 backdrop-blur-sm sticky top-0 z-10">
+        <header className="h-20 border-b border-chamber-border flex items-center justify-between px-4 lg:px-8 bg-chamber-bg/95 backdrop-blur-xl sticky top-0 z-10 shadow-lg shadow-black/20">
           <div className="flex items-center gap-3 lg:gap-4">
             <button onClick={() => setIsLeftSidebarOpen(true)} className="lg:hidden p-2 text-chamber-muted">
               <Menu className="w-5 h-5" />
@@ -685,36 +935,95 @@ export default function App() {
             ))}
           </div>
 
-          <div className="flex items-center gap-2">
-            <button onClick={() => setIsManualOpen(true)} className="p-2 text-chamber-muted hover:text-white transition-colors" title="Manual & Guide">
+          <div className="flex items-center gap-1 sm:gap-2">
+            <button 
+              onClick={() => setIsManualOpen(true)} 
+              className="p-2 sm:px-3 sm:py-2 text-chamber-muted hover:text-white hover:bg-white/10 rounded-lg transition-all flex items-center gap-2"
+              title="Manual & Guide"
+            >
               <HelpCircle className="w-5 h-5" />
+              <span className="hidden sm:inline text-xs font-medium">Help</span>
             </button>
-            <button onClick={() => setIsSettingsOpen(true)} className="p-2 text-chamber-muted hover:text-white transition-colors" title="Settings">
+            <button 
+              onClick={() => setIsSettingsOpen(true)} 
+              className="p-2 sm:px-3 sm:py-2 text-chamber-muted hover:text-white hover:bg-white/10 rounded-lg transition-all flex items-center gap-2"
+              title="Settings"
+            >
               <Settings className="w-5 h-5" />
+              <span className="hidden sm:inline text-xs font-medium">Settings</span>
             </button>
-            <button onClick={() => setIsRightSidebarOpen(true)} className="lg:hidden p-2 text-chamber-muted">
+            <div className="h-6 w-px bg-chamber-border mx-1" />
+            <SignedIn>
+              <UserButton 
+                appearance={{
+                  elements: {
+                    avatarBox: "w-8 h-8 rounded-lg border border-chamber-border",
+                    userButtonPopoverCard: "bg-chamber-panel border-chamber-border",
+                    userPreviewTextContainer: "text-chamber-ink",
+                    userButtonPopoverActionButton: "text-chamber-muted hover:text-white hover:bg-white/10",
+                    userButtonPopoverActionButtonText: "text-chamber-ink",
+                    userButtonPopoverFooter: "hidden",
+                  }
+                }}
+              />
+            </SignedIn>
+            <SignedOut>
+              <SignInButton mode="modal">
+                <button className="p-2 sm:px-3 sm:py-2 text-chamber-muted hover:text-white hover:bg-white/10 rounded-lg transition-all flex items-center gap-2">
+                  <UserIcon className="w-5 h-5" />
+                  <span className="hidden sm:inline text-xs font-medium">Sign In</span>
+                </button>
+              </SignInButton>
+            </SignedOut>
+            <button 
+              onClick={() => setIsRightSidebarOpen(true)} 
+              className="lg:hidden p-2 text-chamber-muted hover:text-white hover:bg-white/10 rounded-lg transition-all"
+            >
               <Users className="w-5 h-5" />
             </button>
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-4 lg:p-8 space-y-8 scroll-hide">
+        <div ref={feedContainerRef} className="flex-1 overflow-y-auto p-4 lg:p-8 space-y-8 scroll-hide relative">
           <AnimatePresence initial={false}>
-            {rootPosts.map((post) => {
-              const replies = getReplies(post.id);
-              return (
-                <React.Fragment key={post.id}>
-                  {renderPostBubble(post, false)}
-                  {replies.length > 0 && (
-                    <div className="ml-10 lg:ml-16 border-l-2 border-chamber-border/40 pl-4 lg:pl-6 space-y-6">
-                      {replies.map(reply => renderPostBubble(reply, true))}
-                    </div>
-                  )}
-                </React.Fragment>
-              );
-            })}
+            {rootPosts.map((post) => (
+              <React.Fragment key={post.id}>
+                {renderPostBubble(post, false, 0)}
+              </React.Fragment>
+            ))}
           </AnimatePresence>
           <div ref={feedEndRef} />
+          
+          {/* Floating Action Buttons */}
+          <AnimatePresence>
+            {showScrollToTop && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 20 }}
+                className="fixed bottom-24 right-4 lg:right-8 z-30 flex flex-col gap-2"
+              >
+                <motion.button
+                  onClick={() => setIsSettingsOpen(true)}
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  className="w-12 h-12 bg-chamber-panel border border-chamber-border rounded-full flex items-center justify-center text-chamber-muted hover:text-white hover:border-white/30 hover:bg-chamber-bg shadow-lg shadow-black/30 transition-all"
+                  title="Settings"
+                >
+                  <Settings className="w-5 h-5" />
+                </motion.button>
+                <motion.button
+                  onClick={scrollToTop}
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  className="w-10 h-10 bg-white text-black rounded-full flex items-center justify-center shadow-lg shadow-black/30"
+                  title="Scroll to top"
+                >
+                  <ChevronUp className="w-5 h-5" />
+                </motion.button>
+              </motion.div>
+            )}
+          </AnimatePresence>
           
           {state.posts.length === 0 && (
             <div className="text-center py-20">
@@ -889,19 +1198,80 @@ export default function App() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+            className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4"
             onClick={() => setIsSettingsOpen(false)}
           >
             <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
+              initial={{ scale: 0.95, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 20 }}
               onClick={e => e.stopPropagation()}
-              className="bg-chamber-panel border border-chamber-border rounded-2xl p-6 max-w-sm w-full"
+              className="bg-chamber-panel border border-chamber-border rounded-2xl p-6 max-w-md w-full shadow-2xl shadow-black/50"
             >
-              <h2 className="font-display text-xl font-bold mb-6">Chamber Settings</h2>
+              <div className="flex items-center gap-3 mb-6">
+                <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-chamber-border to-chamber-bg flex items-center justify-center border border-white/10">
+                  <Settings className="w-6 h-6 text-white/70" />
+                </div>
+                <div>
+                  <h2 className="font-display text-xl font-bold">Chamber Settings</h2>
+                  <p className="text-xs text-chamber-muted">Configure your council experience</p>
+                </div>
+              </div>
               
-              <div className="space-y-4">
+              <div className="space-y-3">
+                {/* Quick Actions */}
+                <div className="p-4 bg-chamber-bg rounded-xl border border-chamber-border">
+                  <h3 className="text-xs uppercase tracking-wider text-chamber-muted font-bold mb-3">Quick Actions</h3>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => { setIsSettingsOpen(false); setIsLeftSidebarOpen(true); }}
+                      className="py-2.5 px-3 bg-chamber-border/50 hover:bg-chamber-border rounded-lg text-xs font-medium transition-all flex items-center justify-center gap-2"
+                    >
+                      <BookOpen className="w-3.5 h-3.5" />
+                      Knowledge
+                    </button>
+                    <button
+                      onClick={() => { setIsSettingsOpen(false); setIsRightSidebarOpen(true); }}
+                      className="py-2.5 px-3 bg-chamber-border/50 hover:bg-chamber-border rounded-lg text-xs font-medium transition-all flex items-center justify-center gap-2"
+                    >
+                      <Users className="w-3.5 h-3.5" />
+                      Council
+                    </button>
+                    <button
+                      onClick={() => { setIsSettingsOpen(false); setIsManualOpen(true); }}
+                      className="py-2.5 px-3 bg-chamber-border/50 hover:bg-chamber-border rounded-lg text-xs font-medium transition-all flex items-center justify-center gap-2"
+                    >
+                      <HelpCircle className="w-3.5 h-3.5" />
+                      Manual
+                    </button>
+                    <button
+                      onClick={() => { scrollToTop(); setIsSettingsOpen(false); }}
+                      className="py-2.5 px-3 bg-chamber-border/50 hover:bg-chamber-border rounded-lg text-xs font-medium transition-all flex items-center justify-center gap-2"
+                    >
+                      <ChevronUp className="w-3.5 h-3.5" />
+                      To Top
+                    </button>
+                  </div>
+                </div>
+
+                {/* Current Session */}
+                <div className="p-4 bg-chamber-bg rounded-xl border border-chamber-border">
+                  <h3 className="text-xs uppercase tracking-wider text-chamber-muted font-bold mb-3">Current Session</h3>
+                  <div className="flex items-center justify-between text-sm mb-2">
+                    <span className="text-chamber-muted">Active Members</span>
+                    <span className="font-medium">{state.activeMembers.length} / {Object.keys(COUNCIL_MEMBERS).length}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-sm mb-3">
+                    <span className="text-chamber-muted">Mode</span>
+                    <span className="font-medium capitalize">{state.mode}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-chamber-muted">Messages</span>
+                    <span className="font-medium">{state.posts.length}</span>
+                  </div>
+                </div>
+
+                {/* Danger Zone */}
                 <button
                   onClick={clearHistory}
                   className="w-full py-3 px-4 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400 text-sm font-bold hover:bg-red-500/20 transition-all flex items-center justify-center gap-2"

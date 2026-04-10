@@ -62,3 +62,9 @@ export interface CouncilState {
   posts: Post[];
   notes: KnowledgeNote[];
 }
+
+export interface CouncilConfig {
+  mode: InteractionMode;
+  model: string;
+  activeMembers: OrishaName[];
+}
