@@ -1,4 +1,12 @@
 {
+  "buildCommand": "vite build",
+  "outputDirectory": "dist",
+  "functions": {
+    "api/generate.ts": {
+      "memory": 1024,
+      "maxDuration": 30
+    }
+  },
   "rewrites": [
     { "source": "/(.*)", "destination": "/index.html" }
   ]

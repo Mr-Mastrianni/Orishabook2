@@ -70,9 +70,9 @@ ${mode === "roundup" ? "Focus on synthesizing the main points and identifying ne
 
   try {
     // Use the appropriate API endpoint based on environment
-    const apiUrl = typeof window !== 'undefined' && window.location.hostname === 'localhost' 
+    const apiUrl = typeof window !== 'undefined' && window.location.hostname === 'localhost'
       ? "http://localhost:3000/api/council/generate"
-      : "/api/council/generate";
+      : "/api/generate";
     const response = await fetch(apiUrl, {
       method: "POST",
       headers: {
