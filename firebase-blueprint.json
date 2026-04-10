@@ -1,0 +1,59 @@
+{
+  "entities": {
+    "Post": {
+      "title": "Post",
+      "description": "A message in the shared council feed",
+      "type": "object",
+      "properties": {
+        "authorId": { "type": "string", "description": "The ID of the author (Orisha name or 'user')" },
+        "authorName": { "type": "string", "description": "The display name of the author" },
+        "content": { "type": "string", "description": "The text content of the post" },
+        "timestamp": { "type": "number", "description": "Creation timestamp" },
+        "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional topic tags" },
+        "threadId": { "type": "string", "description": "Optional ID for threading" },
+        "parentId": { "type": "string", "description": "Optional parent post ID" },
+        "referencedNoteId": { "type": "string", "description": "Optional knowledge note reference" }
+      },
+      "required": ["authorId", "authorName", "content", "timestamp"]
+    },
+    "KnowledgeNote": {
+      "title": "KnowledgeNote",
+      "description": "A piece of research or context for the council",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "category": { "type": "string" },
+        "sourceType": { "type": "string" },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "content": { "type": "string" },
+        "citation": { "type": "string" }
+      },
+      "required": ["title", "content"]
+    },
+    "CouncilConfig": {
+      "title": "CouncilConfig",
+      "description": "Global configuration for the council chamber",
+      "type": "object",
+      "properties": {
+        "mode": { "type": "string", "enum": ["quiet", "debate", "roundup"] },
+        "model": { "type": "string" },
+        "activeMembers": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["mode", "model", "activeMembers"]
+    }
+  },
+  "firestore": {
+    "/posts/{postId}": {
+      "schema": "Post",
+      "description": "Collection of all council and user posts"
+    },
+    "/notes/{noteId}": {
+      "schema": "KnowledgeNote",
+      "description": "Collection of knowledge notes"
+    },
+    "/config/council": {
+      "schema": "CouncilConfig",
+      "description": "Global council settings"
+    }
+  }
+}
