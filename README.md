@@ -77,6 +77,15 @@ A living AI council of Orisha-inspired research partners who share a room, post 
    npm run dev
    ```
 
+### Deploying to Vercel
+
+1. Push your code to GitHub
+2. Import your repo into Vercel
+3. Add the `VITE_CLERK_PUBLISHABLE_KEY` environment variable in Vercel's dashboard
+4. Deploy!
+
+The Clerk modal-based authentication works out of the box with Vercel's default domain - no additional domain configuration needed.
+
 ## Authentication Architecture
 
 The app uses a hybrid authentication approach:
