@@ -56,6 +56,28 @@ service cloud.firestore {
              data.activeMembers is list;
     }
 
+    function isValidResonance(data) {
+      return data.keys().hasAll(['userId', 'postId', 'value', 'timestamp']) &&
+             data.userId is string &&
+             data.postId is string &&
+             data.value in [1, -1] &&
+             data.timestamp is number;
+    }
+
+    function isValidMembership(data) {
+      return data.keys().hasAll(['userId', 'chamberId', 'joinedAt']) &&
+             data.userId is string &&
+             data.chamberId is string &&
+             data.joinedAt is number;
+    }
+
+    function isValidSave(data) {
+      return data.keys().hasAll(['userId', 'postId', 'savedAt']) &&
+             data.userId is string &&
+             data.postId is string &&
+             data.savedAt is number;
+    }
+
     // ===============================================================
     // Rules
     // ===============================================================
@@ -75,6 +97,24 @@ service cloud.firestore {
     match /config/council {
       allow read: if isAuthenticated();
       allow write: if isAuthenticated() && isValidConfig(request.resource.data);
+    }
+
+    match /resonances/{resonanceId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && isValidResonance(request.resource.data);
+      allow delete: if isAuthenticated();
+    }
+
+    match /chamber_memberships/{membershipId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && isValidMembership(request.resource.data);
+      allow delete: if isAuthenticated();
+    }
+
+    match /saves/{saveId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && isValidSave(request.resource.data);
+      allow delete: if isAuthenticated();
     }
 
     // Default deny

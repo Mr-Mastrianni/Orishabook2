@@ -43,10 +43,12 @@ import {
   KnowledgeNote,
   CouncilState,
   RoundStep,
-  RoundPhase
+  RoundPhase,
+  DefaultView,
+  DEFAULT_PREFERENCES,
 } from "./lib/council/types";
 import { COUNCIL_MEMBERS } from "./lib/council/members";
-import { generateCouncilResponse } from "./lib/council/orchestrator";
+import { generateCouncilResponse, generateAgentReply } from "./lib/council/orchestrator";
 import {
   getPosts,
   addPost as addPostToFirestore,
@@ -58,7 +60,21 @@ import {
   getConfig,
   updateConfig,
   initializeData,
+  getUserResonances,
+  setResonance,
+  getUserMemberships,
+  joinChamber,
+  leaveChamber,
+  getChamberMemberCount,
+  getUserSaves,
+  toggleSave,
 } from "./lib/persistence";
+import { CHAMBERS } from "./lib/council/chambers";
+import ArchiveFeed from "./components/ArchiveFeed";
+import ChamberGrid from "./components/ChamberGrid";
+import ProfileModal from "./components/ProfileModal";
+import { useCouncilHeartbeat } from "./hooks/useCouncilHeartbeat";
+import { getNativeChamberId } from "./lib/council/chambers";
 import { 
   useUser, 
   useClerk, 
@@ -75,6 +91,7 @@ export default function App() {
     activeMembers: ["Orunmila", "Esu", "Ogun", "Ochosi", "Oshun", "Yemoja", "Sango"],
     posts: [],
     notes: [],
+    ...DEFAULT_PREFERENCES,
   });
   
   const [inputValue, setInputValue] = useState("");
@@ -93,6 +110,18 @@ export default function App() {
   const [showScrollToTop, setShowScrollToTop] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [firebaseReady, setFirebaseReady] = useState(false);
+  const [view, setView] = useState<"chat" | "archive" | "chambers" | "chamber-detail">("chat");
+  const [activeChamberId, setActiveChamberId] = useState<string | null>(null);
+  const [userVotes, setUserVotes] = useState<Record<string, 1 | -1 | 0>>({});
+  const [joinedChamberIds, setJoinedChamberIds] = useState<Set<string>>(new Set());
+  const [chamberMemberCounts, setChamberMemberCounts] = useState<Record<string, number>>({});
+  const [savedPostIds, setSavedPostIds] = useState<Set<string>>(new Set());
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [lastArchiveVisit, setLastArchiveVisit] = useState<number>(() => {
+    if (typeof window === "undefined") return 0;
+    const raw = window.localStorage.getItem("council:lastArchiveVisit");
+    return raw ? Number(raw) || 0 : 0;
+  });
   const feedEndRef = useRef<HTMLDivElement>(null);
   const feedContainerRef = useRef<HTMLDivElement>(null);
   
@@ -129,7 +158,7 @@ export default function App() {
   useEffect(() => {
     const loadData = async () => {
       if (!firebaseReady) return;
-      
+
       try {
         const data = await initializeData();
         setState({
@@ -137,7 +166,34 @@ export default function App() {
           activeMembers: data.config.activeMembers as OrishaName[],
           posts: data.posts,
           notes: data.notes,
+          heartbeatIntervalMinutes: data.config.heartbeatIntervalMinutes,
+          autoReplyProbability: data.config.autoReplyProbability,
+          defaultView: data.config.defaultView,
+          creativity: data.config.creativity,
         });
+        // Apply the user's preferred landing view once on load — subsequent
+        // tab clicks override in-session but don't persist.
+        setView(data.config.defaultView);
+
+        if (user?.id) {
+          const [resonances, memberships, saves] = await Promise.all([
+            getUserResonances(user.id),
+            getUserMemberships(user.id),
+            getUserSaves(user.id),
+          ]);
+          const voteMap: Record<string, 1 | -1 | 0> = {};
+          for (const r of resonances) voteMap[r.postId] = r.value;
+          setUserVotes(voteMap);
+          setJoinedChamberIds(new Set(memberships.map((m) => m.chamberId)));
+          setSavedPostIds(new Set(saves.map((s) => s.postId)));
+        }
+
+        // Member counts per chamber are read-mostly and small (7 chambers),
+        // so fetch them once on load in parallel.
+        const counts = await Promise.all(
+          CHAMBERS.map(async (c) => [c.id, await getChamberMemberCount(c.id)] as const)
+        );
+        setChamberMemberCounts(Object.fromEntries(counts));
       } catch (error) {
         console.error("Failed to load data:", error);
       } finally {
@@ -146,7 +202,203 @@ export default function App() {
     };
 
     loadData();
-  }, [firebaseReady]);
+  }, [firebaseReady, user?.id]);
+
+  const toggleChamberMembership = async (chamberId: string) => {
+    if (!user?.id) return;
+    const isJoined = joinedChamberIds.has(chamberId);
+
+    // Optimistic update
+    setJoinedChamberIds((prev) => {
+      const next = new Set(prev);
+      if (isJoined) next.delete(chamberId);
+      else next.add(chamberId);
+      return next;
+    });
+    setChamberMemberCounts((prev) => ({
+      ...prev,
+      [chamberId]: Math.max(0, (prev[chamberId] ?? 0) + (isJoined ? -1 : 1)),
+    }));
+
+    try {
+      if (isJoined) {
+        await leaveChamber(user.id, chamberId);
+      } else {
+        await joinChamber(user.id, chamberId);
+      }
+    } catch (error) {
+      console.error("Failed to toggle chamber membership:", error);
+      // Roll back
+      setJoinedChamberIds((prev) => {
+        const next = new Set(prev);
+        if (isJoined) next.add(chamberId);
+        else next.delete(chamberId);
+        return next;
+      });
+      setChamberMemberCounts((prev) => ({
+        ...prev,
+        [chamberId]: Math.max(0, (prev[chamberId] ?? 0) + (isJoined ? 1 : -1)),
+      }));
+    }
+  };
+
+  const openChamber = (chamberId: string) => {
+    setActiveChamberId(chamberId);
+    setView("chamber-detail");
+  };
+
+  const backToChambers = () => {
+    setActiveChamberId(null);
+    setView("chambers");
+  };
+
+  /**
+   * Manually invite another council member to respond to a root post.
+   * Used from the Archive thread detail modal. Picks a random active
+   * member other than the original author.
+   */
+  const handleInviteResponse = async (rootPost: Post) => {
+    if (rootPost.authorId === "user") return;
+    const others = state.activeMembers.filter((m) => m !== rootPost.authorId);
+    if (others.length === 0) return;
+    const replierId = others[Math.floor(Math.random() * others.length)];
+    const reply = await generateAgentReply(replierId, rootPost, {
+      recentPosts: postsRef.current.slice(-6),
+    });
+    await addPost(reply);
+  };
+
+  /**
+   * Thin wrapper around generateCouncilResponse that injects the user's
+   * configured creativity as temperature. Lets every call site stay concise
+   * while still respecting settings changes.
+   */
+  const runMember = (
+    memberId: OrishaName,
+    mode: InteractionMode,
+    ctx: Parameters<typeof generateCouncilResponse>[2]
+  ) =>
+    generateCouncilResponse(memberId, mode, {
+      ...ctx,
+      temperature: state.creativity,
+    });
+
+  const handleToggleSave = async (postId: string, nextSaved: boolean) => {
+    if (!user?.id) return;
+    // Optimistic
+    setSavedPostIds((prev) => {
+      const next = new Set(prev);
+      if (nextSaved) next.add(postId);
+      else next.delete(postId);
+      return next;
+    });
+
+    try {
+      await toggleSave(user.id, postId, nextSaved);
+    } catch (error) {
+      console.error("Failed to toggle save:", error);
+      // Roll back
+      setSavedPostIds((prev) => {
+        const next = new Set(prev);
+        if (nextSaved) next.delete(postId);
+        else next.add(postId);
+        return next;
+      });
+    }
+  };
+
+  // Heartbeat: periodically posts unprompted "async" reflections from random
+  // active council members. Also exposes a manual trigger used by the
+  // "Summon Thought" button in the right sidebar.
+  const postsRef = useRef<Post[]>(state.posts);
+  useEffect(() => {
+    postsRef.current = state.posts;
+  }, [state.posts]);
+
+  /**
+   * Maybe spawn one auto-reply from a different active Orisha after an async
+   * post lands. Keeps the chamber feeling alive without turning every post
+   * into a mandatory debate. Probability is driven by user settings.
+   */
+  const maybeScheduleAutoReply = async (rootPost: Post) => {
+    // Only auto-reply to root async posts — never to a reply (avoids loops)
+    // and never to user_prompted posts (user already triggered those).
+    if (rootPost.type !== "async" || rootPost.parentId) return;
+
+    const probability = state.autoReplyProbability;
+    if (probability <= 0) return;
+
+    const others = state.activeMembers.filter((m) => m !== rootPost.authorId);
+    if (others.length === 0) return;
+    if (Math.random() > probability) return;
+
+    const replierId = others[Math.floor(Math.random() * others.length)];
+    const reply = await generateAgentReply(replierId, rootPost, {
+      recentPosts: postsRef.current.slice(-6),
+      temperature: state.creativity,
+    });
+    await addPost(reply);
+  };
+
+  const heartbeat = useCouncilHeartbeat({
+    activeMembers: state.activeMembers,
+    getRecentPosts: () => postsRef.current.slice(-8),
+    onGenerated: async (post) => {
+      const saved = await addPost(post);
+      if (saved) await maybeScheduleAutoReply(saved);
+    },
+    enabled: state.heartbeatIntervalMinutes > 0,
+    intervalMs: Math.max(1, state.heartbeatIntervalMinutes) * 60 * 1000,
+    getTemperature: () => state.creativity,
+  });
+
+  const unseenAsyncCount = state.posts.filter(
+    (p) => p.type === "async" && p.timestamp > lastArchiveVisit
+  ).length;
+
+  const openArchive = () => {
+    setView("archive");
+    const now = Date.now();
+    setLastArchiveVisit(now);
+    try {
+      window.localStorage.setItem("council:lastArchiveVisit", String(now));
+    } catch {
+      // localStorage unavailable — badge will just not persist across reloads.
+    }
+  };
+
+  const handleVote = async (postId: string, next: 1 | -1 | 0) => {
+    if (!user?.id) return;
+    const prev = userVotes[postId] ?? 0;
+    const delta = next - prev;
+
+    // Optimistic update: flip local vote + post count before the network round-trip.
+    setUserVotes((v) => ({ ...v, [postId]: next }));
+    setState((s) => ({
+      ...s,
+      posts: s.posts.map((p) =>
+        p.id === postId
+          ? { ...p, resonanceCount: (p.resonanceCount ?? 0) + delta }
+          : p
+      ),
+    }));
+
+    try {
+      await setResonance(user.id, postId, next);
+    } catch (error) {
+      console.error("Failed to set resonance:", error);
+      // Roll back on failure.
+      setUserVotes((v) => ({ ...v, [postId]: prev }));
+      setState((s) => ({
+        ...s,
+        posts: s.posts.map((p) =>
+          p.id === postId
+            ? { ...p, resonanceCount: (p.resonanceCount ?? 0) - delta }
+            : p
+        ),
+      }));
+    }
+  };
 
   useEffect(() => {
     feedEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -176,9 +428,16 @@ export default function App() {
     return "Seeker";
   };
 
-  const addPost = async (post: Partial<Post>) => {
+  const addPost = async (post: Partial<Post>): Promise<Post | null> => {
+    const authorId = post.authorId || "user";
+    // If this post is from an Orisha and no chamber was specified, drop it
+    // into that Orisha's native chamber so the chambers feel populated.
+    const resolvedChamberId =
+      post.chamberId ??
+      (authorId !== "user" ? getNativeChamberId(authorId as OrishaName) : undefined);
+
     const newPostData: Omit<Post, "id"> = {
-      authorId: post.authorId || "user",
+      authorId,
       authorName: post.authorName || getUserDisplayName(),
       content: post.content || "",
       timestamp: Date.now(),
@@ -186,6 +445,11 @@ export default function App() {
       threadId: post.threadId,
       parentId: post.parentId,
       referencedNoteId: post.referencedNoteId,
+      title: post.title,
+      type: post.type || "user_prompted",
+      chamberId: resolvedChamberId,
+      resonanceCount: 0,
+      replyCount: 0,
     };
 
     try {
@@ -198,11 +462,13 @@ export default function App() {
         }
         return { ...prev, posts: newPosts };
       });
+      return newPost;
     } catch (error) {
       console.error("Failed to add post:", error);
       // Fallback: add to local state only
       const fallbackPost: Post = { ...newPostData, id: `temp-${Date.now()}` };
       setState(prev => ({ ...prev, posts: [...prev.posts, fallbackPost] }));
+      return fallbackPost;
     }
   };
 
@@ -226,6 +492,25 @@ export default function App() {
       await updateConfig({ mode });
     } catch (error) {
       console.error("Failed to update config:", error);
+    }
+  };
+
+  /**
+   * Update one or more user preferences in the settings modal. Writes
+   * through to Firestore so the choice persists across sessions and
+   * devices. Optimistic — no rollback on failure, just log the error.
+   */
+  const updatePreferences = async (updates: Partial<{
+    heartbeatIntervalMinutes: number;
+    autoReplyProbability: number;
+    defaultView: DefaultView;
+    creativity: number;
+  }>) => {
+    setState(prev => ({ ...prev, ...updates }));
+    try {
+      await updateConfig(updates);
+    } catch (error) {
+      console.error("Failed to update preferences:", error);
     }
   };
 
@@ -254,7 +539,7 @@ export default function App() {
         setIsGenerating(true);
         setGeneratingMember(member.id);
         const threadId = replyTarget ? (replyTarget.threadId || replyTarget.id) : undefined;
-        const response = await generateCouncilResponse(member.id, state.mode, {
+        const response = await runMember(member.id, state.mode, {
           userMessage: inputValue,
           recentPosts: state.posts.slice(-5),
           selectedNote: state.notes.find(n => n.id === selectedNoteId),
@@ -279,7 +564,7 @@ export default function App() {
       const localPosts = [...state.posts];
 
       setGeneratingMember(state.activeMembers[0]);
-      const response = await generateCouncilResponse(state.activeMembers[0], state.mode, {
+      const response = await runMember(state.activeMembers[0], state.mode, {
         userMessage: inputValue,
         recentPosts: localPosts.slice(-5),
         selectedNote: state.notes.find(n => n.id === selectedNoteId),
@@ -340,7 +625,7 @@ export default function App() {
       setGeneratingMember(step.memberId);
       setCurrentRoundPhase(step.label);
 
-      const response = await generateCouncilResponse(step.memberId, state.mode, {
+      const response = await runMember(step.memberId, state.mode, {
         userMessage: topic,
         recentPosts: localPosts.slice(-8),
         selectedNote: state.notes.find(n => n.id === selectedNoteId),
@@ -364,7 +649,7 @@ export default function App() {
   const runRoundup = async () => {
     setIsGenerating(true);
     setGeneratingMember("Orunmila");
-    const response = await generateCouncilResponse("Orunmila", "roundup", {
+    const response = await runMember("Orunmila", "roundup", {
       recentPosts: state.posts.slice(-10),
       selectedNote: state.notes.find(n => n.id === selectedNoteId),
     });
@@ -378,7 +663,7 @@ export default function App() {
       // Fall back to single response if only one member
       setIsGenerating(true);
       setGeneratingMember(state.activeMembers[0]);
-      const response = await generateCouncilResponse(state.activeMembers[0], "debate", {
+      const response = await runMember(state.activeMembers[0], "debate", {
         userMessage,
         recentPosts: state.posts.slice(-5),
         selectedNote: state.notes.find(n => n.id === selectedNoteId),
@@ -398,7 +683,7 @@ export default function App() {
     setGeneratingMember(firstMember);
     setCurrentRoundPhase("Opening position");
 
-    const firstResponse = await generateCouncilResponse(firstMember, "debate", {
+    const firstResponse = await runMember(firstMember, "debate", {
       userMessage,
       recentPosts: localPosts.slice(-5),
       selectedNote: state.notes.find(n => n.id === selectedNoteId),
@@ -422,7 +707,7 @@ export default function App() {
         ? `You are delivering the FINAL WORD in this debate. ${lastSpeaker} just spoke. Read the full exchange above carefully.\nYour job is to:\n- Acknowledge the strongest point made so far.\n- State where you agree and where you diverge.\n- Leave the council with a clear, decisive closing thought.\nDo not simply summarize — take a position.`
         : `You are RESPONDING in a live debate. ${lastSpeaker} just spoke. Read their message above carefully.\nYour job is to:\n- Directly engage with what ${lastSpeaker} said — quote or reference specific points.\n- Challenge what you disagree with, or build on what you find compelling.\n- Add your own unique perspective based on your role and strengths.\nDo NOT repeat what was already said. Push the conversation forward.`;
 
-      const response = await generateCouncilResponse(currentMember, "debate", {
+      const response = await runMember(currentMember, "debate", {
         userMessage,
         recentPosts: localPosts.slice(-8),
         selectedNote: state.notes.find(n => n.id === selectedNoteId),
@@ -916,24 +1201,77 @@ export default function App() {
               <h1 className="font-display text-lg lg:text-xl font-bold tracking-tight">Council Chamber</h1>
               <p className="text-[10px] text-chamber-muted uppercase tracking-[0.2em]">Sanctum of Discernment</p>
             </div>
-          </div>
-          
-          <div className="flex items-center gap-2 bg-chamber-panel p-1 rounded-full border border-chamber-border">
-            {(["quiet", "debate", "roundup"] as InteractionMode[]).map(m => (
+            <div className="ml-2 lg:ml-4 flex items-center gap-1 bg-chamber-panel p-1 rounded-full border border-chamber-border">
               <button
-                key={m}
-                onClick={() => setMode(m)}
+                onClick={() => setView("chat")}
                 className={cn(
-                  "px-2 lg:px-4 py-1 lg:py-1.5 rounded-full text-[9px] lg:text-[10px] uppercase tracking-widest font-bold transition-all",
-                  state.mode === m 
-                    ? "bg-white text-black shadow-lg" 
+                  "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] uppercase tracking-widest font-bold transition-all",
+                  view === "chat"
+                    ? "bg-white text-black shadow-lg"
                     : "text-chamber-muted hover:text-chamber-ink"
                 )}
               >
-                {m}
+                <MessageSquare className="w-3 h-3" />
+                <span className="hidden sm:inline">Chat</span>
               </button>
-            ))}
+              <button
+                onClick={openArchive}
+                className={cn(
+                  "relative flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] uppercase tracking-widest font-bold transition-all",
+                  view === "archive"
+                    ? "bg-white text-black shadow-lg"
+                    : "text-chamber-muted hover:text-chamber-ink"
+                )}
+              >
+                <BookOpen className="w-3 h-3" />
+                <span className="hidden sm:inline">Archive</span>
+                {unseenAsyncCount > 0 && view !== "archive" && (
+                  <span className="absolute -top-1 -right-1 min-w-[16px] h-[16px] px-1 flex items-center justify-center rounded-full bg-violet-500 text-white text-[9px] font-bold">
+                    {unseenAsyncCount > 9 ? "9+" : unseenAsyncCount}
+                  </span>
+                )}
+              </button>
+              <button
+                onClick={() => { setActiveChamberId(null); setView("chambers"); }}
+                className={cn(
+                  "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] uppercase tracking-widest font-bold transition-all",
+                  (view === "chambers" || view === "chamber-detail")
+                    ? "bg-white text-black shadow-lg"
+                    : "text-chamber-muted hover:text-chamber-ink"
+                )}
+              >
+                <Shield className="w-3 h-3" />
+                <span className="hidden sm:inline">Chambers</span>
+              </button>
+            </div>
           </div>
+
+          {view === "chat" ? (
+            <div className="flex items-center gap-2 bg-chamber-panel p-1 rounded-full border border-chamber-border">
+              {(["quiet", "debate", "roundup"] as InteractionMode[]).map(m => (
+                <button
+                  key={m}
+                  onClick={() => setMode(m)}
+                  className={cn(
+                    "px-2 lg:px-4 py-1 lg:py-1.5 rounded-full text-[9px] lg:text-[10px] uppercase tracking-widest font-bold transition-all",
+                    state.mode === m
+                      ? "bg-white text-black shadow-lg"
+                      : "text-chamber-muted hover:text-chamber-ink"
+                  )}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+          ) : view === "archive" ? (
+            <div className="hidden sm:block text-[10px] uppercase tracking-[0.2em] text-chamber-muted">
+              {state.posts.filter(p => !p.parentId).length} reflections
+            </div>
+          ) : (
+            <div className="hidden sm:block text-[10px] uppercase tracking-[0.2em] text-chamber-muted">
+              {joinedChamberIds.size} / {CHAMBERS.length} joined
+            </div>
+          )}
 
           <div className="flex items-center gap-1 sm:gap-2">
             <button 
@@ -944,13 +1282,21 @@ export default function App() {
               <HelpCircle className="w-5 h-5" />
               <span className="hidden sm:inline text-xs font-medium">Help</span>
             </button>
-            <button 
-              onClick={() => setIsSettingsOpen(true)} 
+            <button
+              onClick={() => setIsSettingsOpen(true)}
               className="p-2 sm:px-3 sm:py-2 text-chamber-muted hover:text-white hover:bg-white/10 rounded-lg transition-all flex items-center gap-2"
               title="Settings"
             >
               <Settings className="w-5 h-5" />
               <span className="hidden sm:inline text-xs font-medium">Settings</span>
+            </button>
+            <button
+              onClick={() => setIsProfileOpen(true)}
+              className="p-2 sm:px-3 sm:py-2 text-chamber-muted hover:text-white hover:bg-white/10 rounded-lg transition-all flex items-center gap-2"
+              title="Council Profile"
+            >
+              <UserIcon className="w-5 h-5" />
+              <span className="hidden sm:inline text-xs font-medium">Profile</span>
             </button>
             <div className="h-6 w-px bg-chamber-border mx-1" />
             <SignedIn>
@@ -984,6 +1330,36 @@ export default function App() {
           </div>
         </header>
 
+        {view === "archive" ? (
+          <ArchiveFeed
+            posts={state.posts}
+            userVotes={userVotes}
+            savedPostIds={savedPostIds}
+            onVote={handleVote}
+            onToggleSave={handleToggleSave}
+            onInviteResponse={handleInviteResponse}
+          />
+        ) : view === "chambers" ? (
+          <ChamberGrid
+            posts={state.posts}
+            joinedChamberIds={joinedChamberIds}
+            memberCounts={chamberMemberCounts}
+            onOpen={openChamber}
+            onToggleJoin={toggleChamberMembership}
+          />
+        ) : view === "chamber-detail" && activeChamberId ? (
+          <ArchiveFeed
+            posts={state.posts}
+            userVotes={userVotes}
+            savedPostIds={savedPostIds}
+            onVote={handleVote}
+            onToggleSave={handleToggleSave}
+            onInviteResponse={handleInviteResponse}
+            chamberId={activeChamberId}
+            onBack={backToChambers}
+          />
+        ) : (
+        <>
         <div ref={feedContainerRef} className="flex-1 overflow-y-auto p-4 lg:p-8 space-y-8 scroll-hide relative">
           <AnimatePresence initial={false}>
             {rootPosts.map((post) => (
@@ -1120,6 +1496,8 @@ export default function App() {
             </div>
           )}
         </div>
+        </>
+        )}
       </main>
 
       {/* Right Sidebar: Council Members */}
@@ -1184,6 +1562,15 @@ export default function App() {
           >
             <Zap className="w-4 h-4" />
             Summon Roundup
+          </button>
+          <button
+            onClick={() => heartbeat.trigger()}
+            disabled={isGenerating || state.activeMembers.length === 0}
+            className="w-full py-3 bg-chamber-panel border border-chamber-border hover:bg-white/5 rounded-xl text-sm font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+            title="Have a random active Orisha post an unprompted reflection"
+          >
+            <Sparkles className="w-4 h-4" />
+            Summon a Thought
           </button>
           <p className="text-[10px] text-chamber-muted text-center">
             Active: {state.activeMembers.length} / {Object.keys(COUNCIL_MEMBERS).length}
@@ -1268,6 +1655,121 @@ export default function App() {
                   <div className="flex items-center justify-between text-sm">
                     <span className="text-chamber-muted">Messages</span>
                     <span className="font-medium">{state.posts.length}</span>
+                  </div>
+                </div>
+
+                {/* Preferences */}
+                <div className="p-4 bg-chamber-bg rounded-xl border border-chamber-border space-y-4">
+                  <h3 className="text-xs uppercase tracking-wider text-chamber-muted font-bold">Preferences</h3>
+
+                  {/* Heartbeat */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-sm font-medium">Heartbeat</label>
+                      <span className="text-[10px] text-chamber-muted">Unprompted posts</span>
+                    </div>
+                    <div className="grid grid-cols-4 gap-1 p-1 bg-chamber-panel rounded-lg border border-chamber-border">
+                      {[
+                        { label: "Off", value: 0 },
+                        { label: "5m", value: 5 },
+                        { label: "20m", value: 20 },
+                        { label: "60m", value: 60 },
+                      ].map((opt) => (
+                        <button
+                          key={opt.value}
+                          onClick={() => updatePreferences({ heartbeatIntervalMinutes: opt.value })}
+                          className={cn(
+                            "py-1.5 rounded-md text-[10px] uppercase tracking-widest font-bold transition-all",
+                            state.heartbeatIntervalMinutes === opt.value
+                              ? "bg-white text-black shadow"
+                              : "text-chamber-muted hover:text-white"
+                          )}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Auto-replies */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-sm font-medium">Auto-Replies</label>
+                      <span className="text-[10px] text-chamber-muted">Agent-to-agent</span>
+                    </div>
+                    <div className="grid grid-cols-4 gap-1 p-1 bg-chamber-panel rounded-lg border border-chamber-border">
+                      {[
+                        { label: "Off", value: 0 },
+                        { label: "Rare", value: 0.3 },
+                        { label: "Often", value: 0.6 },
+                        { label: "Always", value: 1 },
+                      ].map((opt) => (
+                        <button
+                          key={opt.value}
+                          onClick={() => updatePreferences({ autoReplyProbability: opt.value })}
+                          className={cn(
+                            "py-1.5 rounded-md text-[10px] uppercase tracking-widest font-bold transition-all",
+                            Math.abs(state.autoReplyProbability - opt.value) < 0.01
+                              ? "bg-white text-black shadow"
+                              : "text-chamber-muted hover:text-white"
+                          )}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Default view */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-sm font-medium">Landing View</label>
+                      <span className="text-[10px] text-chamber-muted">On reload</span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-1 p-1 bg-chamber-panel rounded-lg border border-chamber-border">
+                      {(["chat", "archive", "chambers"] as DefaultView[]).map((v) => (
+                        <button
+                          key={v}
+                          onClick={() => updatePreferences({ defaultView: v })}
+                          className={cn(
+                            "py-1.5 rounded-md text-[10px] uppercase tracking-widest font-bold transition-all capitalize",
+                            state.defaultView === v
+                              ? "bg-white text-black shadow"
+                              : "text-chamber-muted hover:text-white"
+                          )}
+                        >
+                          {v}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Creativity */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-sm font-medium">Creativity</label>
+                      <span className="text-[10px] text-chamber-muted">Response temperature</span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-1 p-1 bg-chamber-panel rounded-lg border border-chamber-border">
+                      {[
+                        { label: "Grounded", value: 0.4 },
+                        { label: "Balanced", value: 0.7 },
+                        { label: "Wild", value: 1.0 },
+                      ].map((opt) => (
+                        <button
+                          key={opt.value}
+                          onClick={() => updatePreferences({ creativity: opt.value })}
+                          className={cn(
+                            "py-1.5 rounded-md text-[10px] uppercase tracking-widest font-bold transition-all",
+                            Math.abs(state.creativity - opt.value) < 0.01
+                              ? "bg-white text-black shadow"
+                              : "text-chamber-muted hover:text-white"
+                          )}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
 
@@ -1405,6 +1907,17 @@ export default function App() {
 
       {/* User Manual Modal */}
       <UserManual isOpen={isManualOpen} onClose={() => setIsManualOpen(false)} />
+
+      {/* Council Profile Modal */}
+      <ProfileModal
+        open={isProfileOpen}
+        onClose={() => setIsProfileOpen(false)}
+        displayName={getUserDisplayName()}
+        posts={state.posts}
+        userVotes={userVotes}
+        savedPostIds={savedPostIds}
+        joinedChamberIds={joinedChamberIds}
+      />
     </div>
   );
 }
