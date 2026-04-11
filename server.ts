@@ -11,8 +11,8 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Using nvidia/nemotron-3-super-120b-a12b:free as the single model for this project
-const DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b:free";
+// Using Kimi K2.5 via OpenRouter for better reliability and conversation quality
+const DEFAULT_MODEL = "moonshotai/kimi-k2.5";
 
 async function startServer() {
   const app = express();
@@ -26,9 +26,61 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
-  // Council Orchestration Endpoint - Uses nvidia/nemotron-3-super-120b-a12b:free
+  // Web Search Endpoint - For real-time information retrieval
+  app.post("/api/council/search", async (req, res) => {
+    const { query } = req.body;
+    
+    const apiKey = process.env.TAVILY_API_KEY || process.env.SERPAPI_KEY;
+    if (!apiKey) {
+      return res.status(501).json({ 
+        error: "Search not configured. Add TAVILY_API_KEY or SERPAPI_KEY to your .env file." 
+      });
+    }
+
+    try {
+      // Try Tavily first (better for AI applications)
+      if (process.env.TAVILY_API_KEY) {
+        const response = await fetch("https://api.tavily.com/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            api_key: process.env.TAVILY_API_KEY,
+            query,
+            search_depth: "advanced",
+            include_answer: true,
+            max_results: 5,
+          })
+        });
+        const data = await response.json();
+        return res.json(data);
+      }
+      
+      // Fallback to SerpAPI
+      const params = new URLSearchParams({
+        api_key: process.env.SERPAPI_KEY!,
+        q: query,
+        engine: "google",
+        num: "5",
+      });
+      const response = await fetch(`https://serpapi.com/search?${params}`);
+      const data = await response.json();
+      res.json({
+        results: data.organic_results?.map((r: any) => ({
+          title: r.title,
+          url: r.link,
+          content: r.snippet,
+        })) || [],
+        answer: data.answer_box?.answer || data.answer_box?.snippet,
+      });
+    } catch (error: any) {
+      console.error("Search error:", error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Council Orchestration Endpoint - Uses Kimi K2.5
   app.post("/api/council/generate", async (req, res) => {
-    const { messages, temperature } = req.body;
+    const { messages, temperature, tools } = req.body;
     
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey || apiKey === "MY_OPENROUTER_API_KEY") {

@@ -34,15 +34,18 @@ A living AI council of Orisha-inspired research partners who share a room, post 
 5. **Council Round**: Trigger a structured 4-phase round (Frame → Challenge → Implement → Synthesize).
 6. **Knowledge Vault**: Inject context from "Knowledge Notes" into the council's reasoning.
 7. **Member Toggling**: Activate or deactivate individual council members in the sidebar.
+8. **Web Search**: Toggle the 🌐 globe icon in the input to enable real-time web search for current information.
 
 ## What to Build Next
 
 1. **Long-Term Memory**: Implement a vector database for semantic retrieval of past council discussions.
-2. **Tool Use**: Give council members access to external tools (search, calculators, etc.) via Gemini Function Calling.
+2. **Tool Use**: Give council members access to external tools (calculators, code execution, etc.) via function calling.
 3. **Export/Import**: Allow exporting council sessions and knowledge notes.
 
 ## Recently Completed
 
+- ✅ **AI Model Upgrade**: Switched to Kimi K2.5 via OpenRouter for better reliability and conversation quality
+- ✅ **Web Search**: Agents can now search the web for real-time information (Tavily or SerpAPI)
 - ✅ **Real Persistence**: Firestore integration for posts, notes, and config
 - ✅ **Threaded Replies**: Nested threads with collapse/expand
 - ✅ **Activate All Members**: All 7 Orisha members are now active by default
@@ -62,8 +65,17 @@ A living AI council of Orisha-inspired research partners who share a room, post 
    cp .env.example .env.local
    ```
 
-2. Add your Clerk publishable key to `.env.local`:
+2. Add your API keys to `.env.local`:
    ```
+   # Required: OpenRouter API Key
+   OPENROUTER_API_KEY=sk-or-...
+   
+   # Required for web search (choose one):
+   TAVILY_API_KEY=tvly-...
+   # OR
+   SERPAPI_KEY=...
+   
+   # Required: Clerk Publishable Key
    VITE_CLERK_PUBLISHABLE_KEY=pk_test_...
    ```
 
@@ -96,7 +108,7 @@ This approach gives us the best of both worlds: Clerk's excellent developer expe
 
 ## Technical Notes
 
-- **AI Model**: Uses OpenRouter API with `nvidia/nemotron-3-super-120b-a12b:free`.
+- **AI Model**: Uses OpenRouter API with `moonshotai/kimi-k2.5` (upgraded from Nemotron 3 Super for better reliability).
 - **Authentication**: Clerk for user identity, Firebase anonymous auth for data access.
 - **Database**: Firebase Firestore for persistence.
 - **Styling**: Tailwind CSS with a custom "Sacred Tech" theme.

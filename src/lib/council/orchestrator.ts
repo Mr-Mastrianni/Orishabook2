@@ -1,6 +1,7 @@
 import { OrishaName, InteractionMode, Post, PostType, KnowledgeNote, DEFAULT_MODEL, RoundPhase } from "./types";
 import { MEMBER_CONSTITUTIONS, SHARED_CONSTITUTION } from "./constitutions";
 import { COUNCIL_MEMBERS } from "./members";
+import { performSearch, formatSearchContext, shouldSearch } from "../search";
 
 /**
  * Async post "heartbeat" flavors. Each represents a different kind of
@@ -107,6 +108,8 @@ export async function generateCouncilResponse(
     debateDirective?: string;
     /** Base temperature. Defaults to 0.7. Clamped to [0, 1.2]. */
     temperature?: number;
+    /** Force web search even if not auto-detected */
+    forceSearch?: boolean;
   }
 ): Promise<Partial<Post>> {
   const temperature = Math.max(0, Math.min(1.2, context.temperature ?? 0.7));
@@ -121,13 +124,22 @@ export async function generateCouncilResponse(
     ? `\n--- DEBATE DIRECTIVE ---\n${context.debateDirective}\n--- END DIRECTIVE ---\n`
     : "";
 
-  const systemInstruction = `
+  // Perform web search if user message suggests it would be helpful, or if forced
+  let searchContext = "";
+  const needsSearch = context.userMessage && (context.forceSearch || shouldSearch(context.userMessage));
+  if (needsSearch) {
+    const searchResults = await performSearch(context.userMessage);
+    searchContext = formatSearchContext(searchResults);
+  }
+
+const systemInstruction = `
 ${SHARED_CONSTITUTION}
 ${constitution}
 
 Current Mode: ${mode}
 ${phaseBlock}${debateBlock}
 ${context.selectedNote ? `Reference this Knowledge Note: ${context.selectedNote.title}\nContent: ${context.selectedNote.content}` : ""}
+${searchContext}
 
 Recent Council Discussion:
 ${context.recentPosts.map(p => `${p.authorName}: ${p.content}`).join("\n")}
@@ -137,7 +149,7 @@ ${mode === "roundup" ? "Focus on synthesizing the main points and identifying ne
 `;
 
   const prompt = context.userMessage
-    ? `The user says: "${context.userMessage}"\nRespond as ${member.name}.`
+    ? `The user says: "${context.userMessage}"${searchContext ? "\n\nUse the web search results provided above to inform your response if relevant." : ""}\nRespond as ${member.name}.`
     : `Continue the council discussion as ${member.name}.`;
 
   try {

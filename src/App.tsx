@@ -33,7 +33,9 @@ import {
   ChevronUp,
   Loader2,
   LogOut,
-  User as UserIcon
+  User as UserIcon,
+  Search,
+  Globe
 } from "lucide-react";
 import { cn } from "./lib/utils";
 import {
@@ -98,8 +100,6 @@ export default function App() {
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatingMember, setGeneratingMember] = useState<OrishaName | null>(null);
-  const [isLeftSidebarOpen, setIsLeftSidebarOpen] = useState(false);
-  const [isRightSidebarOpen, setIsRightSidebarOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isNoteEditorOpen, setIsNoteEditorOpen] = useState(false);
   const [editingNote, setEditingNote] = useState<KnowledgeNote | null>(null);
@@ -117,6 +117,33 @@ export default function App() {
   const [chamberMemberCounts, setChamberMemberCounts] = useState<Record<string, number>>({});
   const [savedPostIds, setSavedPostIds] = useState<Set<string>>(new Set());
   const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [webSearchEnabled, setWebSearchEnabled] = useState(false);
+  
+  // Sidebar visibility states - load from localStorage on init
+  const [isLeftSidebarOpen, setIsLeftSidebarOpen] = useState(() => {
+    if (typeof window === "undefined") return true;
+    const saved = window.localStorage.getItem("council:leftSidebarOpen");
+    return saved !== null ? saved === "true" : true; // Default to open
+  });
+  const [isRightSidebarOpen, setIsRightSidebarOpen] = useState(() => {
+    if (typeof window === "undefined") return true;
+    const saved = window.localStorage.getItem("council:rightSidebarOpen");
+    return saved !== null ? saved === "true" : true; // Default to open
+  });
+  
+  // Persist sidebar states to localStorage
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("council:leftSidebarOpen", String(isLeftSidebarOpen));
+    }
+  }, [isLeftSidebarOpen]);
+  
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("council:rightSidebarOpen", String(isRightSidebarOpen));
+    }
+  }, [isRightSidebarOpen]);
+  
   const [lastArchiveVisit, setLastArchiveVisit] = useState<number>(() => {
     if (typeof window === "undefined") return 0;
     const raw = window.localStorage.getItem("council:lastArchiveVisit");
@@ -517,16 +544,20 @@ export default function App() {
   const handleSend = async () => {
     if (!inputValue.trim()) return;
     
+    const userContent = inputValue.trim();
+    const shouldSearch = webSearchEnabled;
+    
     const userPost: Partial<Post> = {
       authorId: "user",
       authorName: getUserDisplayName(),
-      content: inputValue,
+      content: shouldSearch ? `🔍 ${userContent}` : userContent,
       ...(replyTarget ? { parentId: replyTarget.id, threadId: replyTarget.threadId || replyTarget.id } : {}),
     };
 
     addPost(userPost);
     setInputValue("");
     setReplyTarget(null);
+    setWebSearchEnabled(false); // Reset search toggle after sending
     
     // Check for summons
     const summonMatch = inputValue.match(/@(\w+)/);
@@ -540,10 +571,11 @@ export default function App() {
         setGeneratingMember(member.id);
         const threadId = replyTarget ? (replyTarget.threadId || replyTarget.id) : undefined;
         const response = await runMember(member.id, state.mode, {
-          userMessage: inputValue,
+          userMessage: userContent,
           recentPosts: state.posts.slice(-5),
           selectedNote: state.notes.find(n => n.id === selectedNoteId),
           threadId,
+          forceSearch: shouldSearch,
         });
         if (replyTarget) {
           response.parentId = replyTarget.id;
@@ -565,9 +597,10 @@ export default function App() {
 
       setGeneratingMember(state.activeMembers[0]);
       const response = await runMember(state.activeMembers[0], state.mode, {
-        userMessage: inputValue,
+        userMessage: userContent,
         recentPosts: localPosts.slice(-5),
         selectedNote: state.notes.find(n => n.id === selectedNoteId),
+        forceSearch: shouldSearch,
       });
       addPost(response);
       setIsGenerating(false);
@@ -708,10 +741,11 @@ export default function App() {
         : `You are RESPONDING in a live debate. ${lastSpeaker} just spoke. Read their message above carefully.\nYour job is to:\n- Directly engage with what ${lastSpeaker} said — quote or reference specific points.\n- Challenge what you disagree with, or build on what you find compelling.\n- Add your own unique perspective based on your role and strengths.\nDo NOT repeat what was already said. Push the conversation forward.`;
 
       const response = await runMember(currentMember, "debate", {
-        userMessage,
+        userMessage: userContent,
         recentPosts: localPosts.slice(-8),
         selectedNote: state.notes.find(n => n.id === selectedNoteId),
         debateDirective: directive,
+        forceSearch: shouldSearch,
       });
 
       response.tags = [isLast ? "closing" : "response"];
@@ -1086,7 +1120,7 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen w-full bg-chamber-bg text-chamber-ink overflow-hidden font-sans relative">
+    <div className="h-screen w-full bg-chamber-bg text-chamber-ink font-sans">
       {/* Mobile Sidebar Overlays */}
       <AnimatePresence>
         {(isLeftSidebarOpen || isRightSidebarOpen) && (
@@ -1100,11 +1134,17 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Left Sidebar: Knowledge Notes */}
-      <aside className={cn(
-        "fixed lg:relative inset-y-0 left-0 w-80 border-r border-chamber-border bg-chamber-panel flex flex-col z-50 transition-transform duration-300 lg:translate-x-0",
-        isLeftSidebarOpen ? "translate-x-0" : "-translate-x-full"
-      )}>
+      {/* Main Layout Grid - Desktop: 3 columns with collapsible sidebars, Mobile: 1 column with drawers */}
+      <div className="h-full overflow-hidden lg:grid lg:grid-cols-[auto_1fr_auto] lg:gap-0">
+        
+        {/* Left Sidebar: Knowledge Notes - Collapsible */}
+        <aside className={cn(
+          "fixed lg:relative inset-y-0 left-0 h-full border-r border-chamber-border bg-chamber-panel flex flex-col z-40 overflow-hidden",
+          "transition-all duration-300 ease-in-out",
+          isLeftSidebarOpen 
+            ? "w-[280px] lg:w-[300px] translate-x-0 opacity-100" 
+            : "w-0 translate-x-0 opacity-0 border-r-0"
+        )}>
         <div className="p-6 border-b border-chamber-border flex items-center justify-between">
           <div className="flex items-center gap-2">
             <BookOpen className="w-5 h-5 text-chamber-muted" />
@@ -1187,12 +1227,23 @@ export default function App() {
         </div>
       </aside>
 
-      {/* Main Content: Chamber Feed */}
-      <main className="flex-1 flex flex-col relative min-w-0">
-        <header className="h-20 border-b border-chamber-border flex items-center justify-between px-4 lg:px-8 bg-chamber-bg/95 backdrop-blur-xl sticky top-0 z-10 shadow-lg shadow-black/20">
+        {/* Main Content: Chamber Feed */}
+        <main className="flex flex-col h-full min-w-0 overflow-hidden">
+          {/* Header - Now contained within main column only */}
+          <header className="h-16 border-b border-chamber-border flex items-center justify-between px-4 bg-chamber-bg shrink-0">
           <div className="flex items-center gap-3 lg:gap-4">
-            <button onClick={() => setIsLeftSidebarOpen(true)} className="lg:hidden p-2 text-chamber-muted">
-              <Menu className="w-5 h-5" />
+            {/* Left sidebar toggle (Knowledge Vault) */}
+            <button 
+              onClick={() => setIsLeftSidebarOpen(!isLeftSidebarOpen)} 
+              className={cn(
+                "p-2 rounded-lg mr-2 transition-all",
+                isLeftSidebarOpen 
+                  ? "text-white bg-white/10" 
+                  : "text-chamber-muted hover:text-white hover:bg-white/10"
+              )}
+              title={isLeftSidebarOpen ? "Hide Knowledge Vault" : "Show Knowledge Vault"}
+            >
+              <BookOpen className="w-5 h-5" />
             </button>
             <div className="w-8 h-8 lg:w-10 lg:h-10 rounded-full bg-gradient-to-br from-chamber-border to-chamber-panel flex items-center justify-center border border-white/10">
               <Shield className="w-4 h-4 lg:w-5 lg:h-5 text-white/50" />
@@ -1321,9 +1372,16 @@ export default function App() {
                 </button>
               </SignInButton>
             </SignedOut>
+            {/* Right sidebar toggle (Council) */}
             <button 
-              onClick={() => setIsRightSidebarOpen(true)} 
-              className="lg:hidden p-2 text-chamber-muted hover:text-white hover:bg-white/10 rounded-lg transition-all"
+              onClick={() => setIsRightSidebarOpen(!isRightSidebarOpen)} 
+              className={cn(
+                "p-2 rounded-lg ml-1 transition-all",
+                isRightSidebarOpen 
+                  ? "text-white bg-white/10" 
+                  : "text-chamber-muted hover:text-white hover:bg-white/10"
+              )}
+              title={isRightSidebarOpen ? "Hide Council" : "Show Council"}
             >
               <Users className="w-5 h-5" />
             </button>
@@ -1450,15 +1508,32 @@ export default function App() {
           )}
           
           <div className="max-w-4xl mx-auto flex gap-3">
-            <input
-              type="text"
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
-              placeholder={state.mode === "debate" ? "Pose a question for debate..." : "Address the council..."}
-              className="flex-1 bg-chamber-panel border border-chamber-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-white/30 transition-colors"
-              disabled={isGenerating}
-            />
+            <div className="flex-1 relative">
+              <input
+                type="text"
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
+                placeholder={state.mode === "debate" ? "Pose a question for debate..." : "Address the council..."}
+                className={cn(
+                  "w-full bg-chamber-panel border rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-white/30 transition-colors",
+                  webSearchEnabled ? "border-emerald-500/50 pr-10" : "border-chamber-border"
+                )}
+                disabled={isGenerating}
+              />
+              <button
+                onClick={() => setWebSearchEnabled(!webSearchEnabled)}
+                className={cn(
+                  "absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-lg transition-all",
+                  webSearchEnabled 
+                    ? "text-emerald-400 bg-emerald-500/20" 
+                    : "text-chamber-muted hover:text-white hover:bg-white/10"
+                )}
+                title={webSearchEnabled ? "Web search enabled" : "Enable web search"}
+              >
+                <Globe className="w-4 h-4" />
+              </button>
+            </div>
             <button
               onClick={handleSend}
               disabled={isGenerating || !inputValue.trim()}
@@ -1500,11 +1575,14 @@ export default function App() {
         )}
       </main>
 
-      {/* Right Sidebar: Council Members */}
-      <aside className={cn(
-        "fixed lg:relative inset-y-0 right-0 w-72 border-l border-chamber-border bg-chamber-panel flex flex-col z-50 transition-transform duration-300 lg:translate-x-0",
-        isRightSidebarOpen ? "translate-x-0" : "translate-x-full"
-      )}>
+        {/* Right Sidebar: Council Members - Collapsible */}
+        <aside className={cn(
+          "fixed lg:relative inset-y-0 right-0 h-full border-l border-chamber-border bg-chamber-panel flex flex-col z-40 overflow-hidden",
+          "transition-all duration-300 ease-in-out",
+          isRightSidebarOpen 
+            ? "w-[260px] translate-x-0 opacity-100" 
+            : "w-0 translate-x-0 opacity-0 border-l-0"
+        )}>
         <div className="p-6 border-b border-chamber-border flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Users className="w-5 h-5 text-chamber-muted" />
@@ -1578,7 +1656,9 @@ export default function App() {
         </div>
       </aside>
 
-      {/* Settings Modal */}
+      </div>{/* End grid layout */}
+
+      {/* Settings Modal - Outside grid for proper overlay */}
       <AnimatePresence>
         {isSettingsOpen && (
           <motion.div

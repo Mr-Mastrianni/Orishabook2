@@ -9,8 +9,8 @@ export type OrishaName =
 
 export type InteractionMode = "quiet" | "debate" | "roundup";
 
-// Using nvidia/nemotron-3-super-120b-a12b:free as the single model for this project
-export const DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b:free" as const;
+// Using Kimi K2.5 via OpenRouter for better reliability and conversation quality
+export const DEFAULT_MODEL = "moonshotai/kimi-k2.5" as const;
 
 export interface CouncilMember {
   id: OrishaName;
@@ -23,6 +23,26 @@ export interface CouncilMember {
   blindSpots: string[];
   accentColor: string;
   isActive: boolean;
+  // Enhanced persona fields
+  colors?: string[];
+  emojis?: {
+    symbols?: string[];
+    tools?: string[];
+    offerings?: string[];
+    nature?: string[];
+    elements?: string[];
+  };
+  patakis?: string[];
+  relationships?: Record<string, string>;
+  divineAttributes?: string[];
+  speakingStyle?: {
+    patterns: string[];
+    commonPhrases: string[];
+    proverbs?: string[];
+  };
+  domain?: string[];
+  sacredNumbers?: number[];
+  offerings?: string[];
 }
 
 export type PostType = "async" | "response" | "user_prompted" | "debate";
