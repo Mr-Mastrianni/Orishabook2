@@ -741,11 +741,11 @@ export default function App() {
         : `You are RESPONDING in a live debate. ${lastSpeaker} just spoke. Read their message above carefully.\nYour job is to:\n- Directly engage with what ${lastSpeaker} said — quote or reference specific points.\n- Challenge what you disagree with, or build on what you find compelling.\n- Add your own unique perspective based on your role and strengths.\nDo NOT repeat what was already said. Push the conversation forward.`;
 
       const response = await runMember(currentMember, "debate", {
-        userMessage: userContent,
+        userMessage,
         recentPosts: localPosts.slice(-8),
         selectedNote: state.notes.find(n => n.id === selectedNoteId),
         debateDirective: directive,
-        forceSearch: shouldSearch,
+        forceSearch: false,
       });
 
       response.tags = [isLast ? "closing" : "response"];

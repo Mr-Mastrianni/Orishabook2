@@ -1,7 +1,6 @@
-import { OrishaName, InteractionMode, Post, PostType, KnowledgeNote, DEFAULT_MODEL, RoundPhase } from "./types";
-import { MEMBER_CONSTITUTIONS, SHARED_CONSTITUTION } from "./constitutions";
+import { OrishaName, InteractionMode, Post, PostType, KnowledgeNote, RoundPhase } from "./types";
 import { COUNCIL_MEMBERS } from "./members";
-import { performSearch, formatSearchContext, shouldSearch } from "../search";
+import { runPipeline, extractTitle } from "./pipeline";
 
 /**
  * Async post "heartbeat" flavors. Each represents a different kind of
@@ -96,6 +95,12 @@ Ground your proposal in reality. The council needs a plan, not a vision.`,
 Be decisive. The council looks to you for final judgment.`,
 };
 
+// ─── Public API ──────────────────────────────────────────────────────────────
+
+/**
+ * Generate a council response from an Orisha using the structured pipeline.
+ * Handles user-prompted messages, debate responses, and council rounds.
+ */
 export async function generateCouncilResponse(
   memberId: OrishaName,
   mode: InteractionMode,
@@ -106,198 +111,84 @@ export async function generateCouncilResponse(
     threadId?: string;
     roundPhase?: RoundPhase;
     debateDirective?: string;
-    /** Base temperature. Defaults to 0.7. Clamped to [0, 1.2]. */
     temperature?: number;
-    /** Force web search even if not auto-detected */
     forceSearch?: boolean;
   }
 ): Promise<Partial<Post>> {
-  const temperature = Math.max(0, Math.min(1.2, context.temperature ?? 0.7));
-  const member = COUNCIL_MEMBERS[memberId];
-  const constitution = MEMBER_CONSTITUTIONS[memberId];
-
-  const phaseBlock = context.roundPhase
-    ? `\n--- COUNCIL ROUND DIRECTIVE ---\n${PHASE_DIRECTIVES[context.roundPhase]}\n--- END DIRECTIVE ---\n`
-    : "";
-
-  const debateBlock = context.debateDirective
-    ? `\n--- DEBATE DIRECTIVE ---\n${context.debateDirective}\n--- END DIRECTIVE ---\n`
-    : "";
-
-  // Perform web search if user message suggests it would be helpful, or if forced
-  let searchContext = "";
-  const needsSearch = context.userMessage && (context.forceSearch || shouldSearch(context.userMessage));
-  if (needsSearch) {
-    const searchResults = await performSearch(context.userMessage);
-    searchContext = formatSearchContext(searchResults);
+  // Build the directive from phase or debate or mode
+  let directive = "";
+  if (context.roundPhase) {
+    directive = `--- COUNCIL ROUND DIRECTIVE ---\n${PHASE_DIRECTIVES[context.roundPhase]}\n--- END DIRECTIVE ---`;
+  }
+  if (context.debateDirective) {
+    directive += `\n--- DEBATE DIRECTIVE ---\n${context.debateDirective}\n--- END DIRECTIVE ---`;
   }
 
-const systemInstruction = `
-${SHARED_CONSTITUTION}
-${constitution}
-
-Current Mode: ${mode}
-${phaseBlock}${debateBlock}
-${context.selectedNote ? `Reference this Knowledge Note: ${context.selectedNote.title}\nContent: ${context.selectedNote.content}` : ""}
-${searchContext}
-
-Recent Council Discussion:
-${context.recentPosts.map(p => `${p.authorName}: ${p.content}`).join("\n")}
-
-${mode === "debate" && !context.debateDirective ? "You are encouraged to respectfully challenge or build upon the ideas of other council members." : ""}
-${mode === "roundup" ? "Focus on synthesizing the main points and identifying next steps." : ""}
-`;
-
-  const prompt = context.userMessage
-    ? `The user says: "${context.userMessage}"${searchContext ? "\n\nUse the web search results provided above to inform your response if relevant." : ""}\nRespond as ${member.name}.`
-    : `Continue the council discussion as ${member.name}.`;
-
-  try {
-    // Use the appropriate API endpoint based on environment
-    const apiUrl = typeof window !== 'undefined' && window.location.hostname === 'localhost'
-      ? "http://localhost:3000/api/council/generate"
-      : "/api/generate";
-    const response = await fetch(apiUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: DEFAULT_MODEL,
-        messages: [
-          { role: "system", content: systemInstruction },
-          { role: "user", content: prompt }
-        ],
-        temperature,
-      })
-    });
-
-    const data = await response.json();
-    
-    if (!response.ok) {
-      throw new Error(data.error?.message || "Server API error");
-    }
-
-    return {
-      authorId: memberId,
-      authorName: member.name,
-      content: data.choices[0].message.content || "...",
-      timestamp: Date.now(),
+  return runPipeline(
+    {
+      memberId,
+      mode,
+      userMessage: context.userMessage,
+      recentPosts: context.recentPosts,
+      selectedNote: context.selectedNote,
       threadId: context.threadId,
-    };
-  } catch (error) {
-    console.error(`Error generating response for ${memberId}:`, error);
-    return {
-      authorId: memberId,
-      authorName: member.name,
-      content: "The connection to the chamber is flickering. I cannot speak right now.",
-      timestamp: Date.now(),
-    };
-  }
+      roundPhase: context.roundPhase,
+      directive: directive || undefined,
+      temperature: context.temperature,
+      forceSearch: context.forceSearch,
+    },
+    {
+      threadId: context.threadId,
+    }
+  );
 }
 
 /**
- * Generate an unprompted ("heartbeat") post from an Orisha. Unlike
- * generateCouncilResponse, there is no user message — the member speaks
- * to the feed on their own initiative, shaped by recent context and the
- * chosen flavor directive.
- *
- * If `flavor` is omitted, one is picked at random.
+ * Generate an unprompted ("heartbeat") post from an Orisha.
+ * Unlike generateCouncilResponse, there is no user message — the member
+ * speaks to the feed on their own initiative, shaped by recent context
+ * and the chosen flavor directive.
  */
 export async function generateAsyncPost(
   memberId: OrishaName,
   options: {
     flavor?: AsyncPostFlavor;
     recentPosts: Post[];
-    /** Base temperature. Async posts get +0.15 on top for variety. */
     temperature?: number;
   }
 ): Promise<Partial<Post>> {
-  const member = COUNCIL_MEMBERS[memberId];
-  const constitution = MEMBER_CONSTITUTIONS[memberId];
   const flavor: AsyncPostFlavor = options.flavor ?? pickAsyncFlavor();
-  const temperature = Math.max(0, Math.min(1.2, (options.temperature ?? 0.7) + 0.15));
+  const member = COUNCIL_MEMBERS[memberId];
 
-  const recentBlock = options.recentPosts.length > 0
-    ? `Recent Council Discussion (for grounding — not a question to answer):\n${options.recentPosts
-        .slice(-8)
-        .map((p) => `${p.authorName}: ${p.content}`)
-        .join("\n")}`
-    : "The council feed is quiet. You are the first voice in a while.";
+  const directive = `--- HEARTBEAT DIRECTIVE (${flavor}) ---\n${ASYNC_DIRECTIVES[flavor]}\n--- END DIRECTIVE ---`;
 
-  const systemInstruction = `
-${SHARED_CONSTITUTION}
-${constitution}
-
-Mode: async post (unprompted)
-
---- HEARTBEAT DIRECTIVE (${flavor}) ---
-${ASYNC_DIRECTIVES[flavor]}
---- END DIRECTIVE ---
-
-${recentBlock}
-`;
-
-  const prompt = `Post to the council feed as ${member.name}. Nobody asked — you felt the need to speak.`;
-
-  try {
-    const apiUrl =
-      typeof window !== "undefined" && window.location.hostname === "localhost"
-        ? "http://localhost:3000/api/council/generate"
-        : "/api/generate";
-    const response = await fetch(apiUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: DEFAULT_MODEL,
-        messages: [
-          { role: "system", content: systemInstruction },
-          { role: "user", content: prompt },
-        ],
-        temperature,
-      }),
-    });
-
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error?.message || "Server API error");
-
-    const content: string = data.choices[0].message.content || "...";
-    // Use the first short line as the card title; strip a leading "#" if the
-    // model returned a markdown heading.
-    const firstLine = content.split("\n").find((l) => l.trim().length > 0) || "";
-    const title = firstLine.replace(/^#+\s*/, "").slice(0, 80);
-
-    const asyncPost: Partial<Post> = {
-      authorId: memberId,
-      authorName: member.name,
-      content,
-      timestamp: Date.now(),
-      type: "async" as PostType,
-      title,
-      tags: [flavor],
-    };
-    return asyncPost;
-  } catch (error) {
-    console.error(`Error generating async post for ${memberId}:`, error);
-    return {
-      authorId: memberId,
-      authorName: member.name,
-      content: "(The chamber is too quiet to speak into.)",
-      timestamp: Date.now(),
+  const result = await runPipeline(
+    {
+      memberId,
+      mode: "quiet" as InteractionMode,
+      recentPosts: options.recentPosts,
+      directive,
+      temperature: options.temperature,
+      temperatureBoost: 0.15,
+    },
+    {
       type: "async" as PostType,
       tags: [flavor],
-    };
+    }
+  );
+
+  // Extract title from first line for async post cards
+  if (result.content && result.content !== "(The chamber is too quiet to speak into.)") {
+    result.title = extractTitle(result.content);
   }
+
+  return result;
 }
 
 /**
- * Generate a reply from one Orisha to another Orisha's post. Sets
- * `parentId` + `threadId` so the reply threads under the target in the
- * Archive view. Tags the reply with its stance so the UI can render a
- * badge without re-classifying later.
- *
- * The `replierId` must not equal `targetPost.authorId` — callers are
- * expected to pick a different member.
+ * Generate a reply from one Orisha to another Orisha's post.
+ * Sets parentId + threadId so the reply threads under the target
+ * in the Archive view.
  */
 export async function generateAgentReply(
   replierId: OrishaName,
@@ -305,94 +196,42 @@ export async function generateAgentReply(
   options: {
     stance?: AgentReplyStance;
     recentPosts: Post[];
-    /** Base temperature. Replies get +0.1 on top for conversational lift. */
     temperature?: number;
   }
 ): Promise<Partial<Post>> {
-  const replier = COUNCIL_MEMBERS[replierId];
-  const constitution = MEMBER_CONSTITUTIONS[replierId];
   const stance: AgentReplyStance = options.stance ?? pickStance();
-  const temperature = Math.max(0, Math.min(1.2, (options.temperature ?? 0.7) + 0.1));
-
+  const replier = COUNCIL_MEMBERS[replierId];
   const targetAuthor = COUNCIL_MEMBERS[targetPost.authorId as OrishaName];
   const targetAuthorName = targetAuthor?.name ?? targetPost.authorName;
+  const threadId = targetPost.threadId || targetPost.id;
 
-  const recentBlock =
-    options.recentPosts.length > 0
-      ? `Recent Council Context:\n${options.recentPosts
-          .slice(-6)
-          .map((p) => `${p.authorName}: ${p.content}`)
-          .join("\n")}`
-      : "";
-
-  const systemInstruction = `
-${SHARED_CONSTITUTION}
-${constitution}
-
-Mode: agent-to-agent reply
-
---- REPLY DIRECTIVE (${stance}) ---
+  const directive = `--- REPLY DIRECTIVE (${stance}) ---
 ${STANCE_DIRECTIVES[stance]}
 --- END DIRECTIVE ---
 
 You are responding to ${targetAuthorName}. Address them by name when it feels natural.
 Do NOT open with "${replier.name}:" — the feed already shows who you are.
 
-${recentBlock}
-`;
-
-  const prompt = `${targetAuthorName} just posted to the council feed:
+${targetAuthorName} just posted to the council feed:
 
 "${targetPost.content}"
 
 Reply to ${targetAuthorName} as ${replier.name}.`;
 
-  const threadId = targetPost.threadId || targetPost.id;
-
-  try {
-    const apiUrl =
-      typeof window !== "undefined" && window.location.hostname === "localhost"
-        ? "http://localhost:3000/api/council/generate"
-        : "/api/generate";
-    const response = await fetch(apiUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: DEFAULT_MODEL,
-        messages: [
-          { role: "system", content: systemInstruction },
-          { role: "user", content: prompt },
-        ],
-        temperature,
-      }),
-    });
-
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error?.message || "Server API error");
-
-    const content: string = data.choices[0].message.content || "...";
-
-    return {
-      authorId: replierId,
-      authorName: replier.name,
-      content,
-      timestamp: Date.now(),
+  return runPipeline(
+    {
+      memberId: replierId,
+      mode: "debate" as InteractionMode,
+      recentPosts: options.recentPosts,
+      directive,
+      temperature: options.temperature,
+      temperatureBoost: 0.1,
+    },
+    {
       type: "response" as PostType,
       parentId: targetPost.id,
       threadId,
       tags: [stance],
-    };
-  } catch (error) {
-    console.error(`Error generating agent reply from ${replierId}:`, error);
-    return {
-      authorId: replierId,
-      authorName: replier.name,
-      content: "(I wanted to answer, but the line went quiet.)",
-      timestamp: Date.now(),
-      type: "response" as PostType,
-      parentId: targetPost.id,
-      threadId,
-      tags: [stance],
-    };
-  }
+    }
+  );
 }
